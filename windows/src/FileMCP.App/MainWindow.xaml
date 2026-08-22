@@ -1,0 +1,134 @@
+<Window x:Class="FileMCP.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FileMCP" Width="560" Height="510" MinWidth="560" MinHeight="510"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanMinimize"
+        Icon="Assets/filemcp.ico">
+    <Window.Resources>
+        <Style TargetType="TextBox">
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Padding" Value="12,4"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TabControl x:Name="MainTabs" Grid.Row="0" Margin="0,0,0,12">
+            <TabItem Header="Connection" x:Name="ConnectionTab">
+                <Grid Margin="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="10"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="18"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="18"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Tunnel ID"/>
+                    <TextBox x:Name="TunnelIdBox" Grid.Row="0" Grid.Column="1" ToolTip="OpenAI Secure MCP Tunnel ID (tunnel_ + 32 lowercase letters or digits)."/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Runtime API key"/>
+                    <PasswordBox x:Name="ApiKeyBox" Grid.Row="2" Grid.Column="1" ToolTip="Stored securely in Windows Credential Manager after saving."/>
+                    <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,6,0,0">
+                        <TextBlock x:Name="ApiKeyStatusText" VerticalAlignment="Center" Foreground="Gray"/>
+                        <Button x:Name="DeleteApiKeyButton" Margin="12,0,0,0" Content="Delete API key" Click="DeleteApiKey_Click"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="5" Grid.ColumnSpan="2" Foreground="Gray" TextWrapping="Wrap"
+                               Text="FileMCP connects this Windows PC to ChatGPT through OpenAI Secure MCP Tunnel. The local MCP server listens only on loopback."/>
+
+                    <StackPanel Grid.Row="7" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="SaveConnectionButton" Content="Save connection" Margin="0,0,8,0" Click="SaveConnection_Click"/>
+                        <Button x:Name="ConnectButton" Content="Connect" Width="120" Click="Connect_Click"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Settings" x:Name="SettingsTab">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Shared directory"/>
+                            <TextBox x:Name="DirectoryBox" Grid.Column="1" Margin="0,0,8,0"/>
+                            <Button Grid.Column="2" Content="Browse…" Click="BrowseDirectory_Click"/>
+                        </Grid>
+
+                        <CheckBox x:Name="EnableCommandsCheckBox" Margin="120,14,0,0" Content="Allow shell commands"
+                                  ToolTip="Allow FileMCP to run PowerShell/CLI commands with the current Windows user's permissions."/>
+                        <TextBlock Margin="120,5,0,0" Foreground="Gray" TextWrapping="Wrap"
+                                   Text="Allows ChatGPT to run PowerShell/CLI commands with the current Windows user's permissions. Enable only for workspaces you trust."/>
+
+                        <Expander x:Name="AdvancedExpander" Header="Advanced options" Margin="0,16,0,0">
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/><RowDefinition Height="8"/>
+                                    <RowDefinition Height="Auto"/><RowDefinition Height="8"/>
+                                    <RowDefinition Height="Auto"/><RowDefinition Height="8"/>
+                                    <RowDefinition Height="Auto"/><RowDefinition Height="8"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Profile"/>
+                                <TextBox x:Name="ProfileBox" Grid.Row="0" Grid.Column="1" ToolTip="Letters, numbers, '.', '_' or '-', maximum 128 characters."/>
+                                <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="MCP port"/>
+                                <TextBox x:Name="PortBox" Grid.Row="2" Grid.Column="1"/>
+                                <TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Text="Health listener"/>
+                                <TextBox x:Name="HealthAddressBox" Grid.Row="4" Grid.Column="1" ToolTip="Loopback only. Port 0 requests an ephemeral tunnel-client health/admin port."/>
+                                <TextBlock Grid.Row="6" Grid.Column="0" VerticalAlignment="Center" Text="Git name"/>
+                                <TextBox x:Name="GitNameBox" Grid.Row="6" Grid.Column="1"/>
+                                <TextBlock Grid.Row="8" Grid.Column="0" VerticalAlignment="Center" Text="Git email"/>
+                                <TextBox x:Name="GitEmailBox" Grid.Row="8" Grid.Column="1"/>
+                            </Grid>
+                        </Expander>
+
+                        <Button x:Name="SaveSettingsButton" Content="Save settings" HorizontalAlignment="Right" Margin="0,16,0,0" Click="SaveSettings_Click"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Logs">
+                <Grid Margin="10">
+                    <TextBox x:Name="LogBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                             FontFamily="Consolas" FontSize="11" Background="#191919" Foreground="White"/>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" VerticalAlignment="Center" Foreground="Gray"
+                       Text="Closing the window keeps FileMCP running in the system tray."/>
+            <Button Grid.Column="1" Content="Quit FileMCP" Click="Quit_Click"/>
+        </Grid>
+    </Grid>
+</Window>
