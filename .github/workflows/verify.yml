@@ -1,0 +1,61 @@
+name: Verify
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-macos:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      MCP_HTTP_FUZZ_ITERATIONS: "40"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Verify vendored tunnel-client
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat vendor/tunnel-client/VERSION)" = "0.0.12"
+          test "$(shasum -a 256 vendor/tunnel-client/darwin-arm64/tunnel-client | awk '{print $1}')" = "b1757220cf4722cec9085ee4a908cf0ee4c1a499a33bd99979b9a9c7669e29b1"
+          vendor/tunnel-client/darwin-arm64/tunnel-client --version | grep -q '^0.0.12+881c9a8fed7cccbe6607cd419863bbca506b8215 '
+          test -s vendor/tunnel-client/NOTICE
+          test -s vendor/tunnel-client/darwin-arm64/THIRD-PARTY-LICENSES.txt
+
+      - name: Static verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n build_macos_app.sh build_macos_icon.sh create_source_archive.sh run_macos_dev.sh tests/test_swift_runtime.sh
+          plutil -lint macos/Info.plist
+          swiftc -warnings-as-errors -typecheck \
+            -framework AppKit \
+            -framework Network \
+            -framework Security \
+            macos/ProcessRunner.swift \
+            macos/LocalMCPServer.swift \
+            macos/LocalMCPRuntime.swift \
+            macos/FileMCPApp.swift \
+            macos/main.swift
+
+      - name: Integration tests
+        run: ./tests/test_swift_runtime.sh
+
+      - name: Build app
+        run: ./build_macos_app.sh
+
+      - name: Verify bundled legal resources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cmp LICENSE dist/FileMCP.app/Contents/Resources/FileMCP-LICENSE.txt
+          cmp vendor/tunnel-client/LICENSE dist/FileMCP.app/Contents/Resources/tunnel-client-LICENSE.txt
+          cmp vendor/tunnel-client/NOTICE dist/FileMCP.app/Contents/Resources/tunnel-client-NOTICE.txt
+          cmp vendor/tunnel-client/darwin-arm64/THIRD-PARTY-LICENSES.txt dist/FileMCP.app/Contents/Resources/tunnel-client-THIRD-PARTY-LICENSES.txt

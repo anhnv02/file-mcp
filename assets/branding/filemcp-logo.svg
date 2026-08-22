@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="280" viewBox="0 0 1120 280" role="img" aria-labelledby="title desc">
+  <title id="title">FileMCP</title>
+  <desc id="desc">FileMCP logo with a teal folder M icon and the tagline Your Files. Your MCP.</desc>
+  <defs>
+    <linearGradient id="surface" x1="0.08" y1="0.9" x2="0.92" y2="0.08">
+      <stop offset="0" stop-color="#0D91A6"/>
+      <stop offset="0.52" stop-color="#20AAA0"/>
+      <stop offset="1" stop-color="#63C977"/>
+    </linearGradient>
+  </defs>
+  <rect width="1120" height="280" rx="36" fill="#F8FAFC"/>
+  <g transform="translate(34 30) scale(.215)">
+    <rect x="80" y="72" width="864" height="864" rx="210" fill="url(#surface)"/>
+    <g fill="none" stroke="#FFFFFF" stroke-width="72" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M300 680 V380 C300 345 328 317 362 317 H478 L544 397 H664 C697 397 724 424 724 457 V680"/>
+      <path d="M300 500 L512 680 L724 500"/>
+    </g>
+  </g>
+  <text x="292" y="133" fill="#111827" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Inter, sans-serif" font-size="74" font-weight="700" letter-spacing="-2.4">FileMCP</text>
+  <text x="296" y="184" fill="#64748B" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', Inter, sans-serif" font-size="29" font-weight="500" letter-spacing="-.35">Your Files. Your MCP.</text>
+</svg>

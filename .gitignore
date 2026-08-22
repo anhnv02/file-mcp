@@ -1,0 +1,12 @@
+# Build output
+build/
+dist/
+
+# Local secrets and legacy credential stores.
+.env
+.env.*
+!.env.example
+.oauth_store.json
+
+# macOS
+.DS_Store
