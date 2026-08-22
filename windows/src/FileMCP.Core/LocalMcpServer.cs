@@ -13,6 +13,11 @@ internal sealed record HttpParseResult(HttpParseStatus Status, HttpRequestData? 
 
 public sealed class LocalMcpServer : IAsyncDisposable
 {
+    private static readonly HashSet<string> UnauthenticatedOAuthDiscoveryPaths = new(StringComparer.Ordinal)
+    {
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource",
+    };
     private static readonly HashSet<string> SingleValueHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
         "content-length", "content-type", "host", "origin", "mcp-protocol-version", "mcp-method", "mcp-name",
@@ -162,13 +167,18 @@ public sealed class LocalMcpServer : IAsyncDisposable
             if (rawLength.Length == 0 || rawLength.Any(ch => ch is < '0' or > '9') || !int.TryParse(rawLength, out contentLength)) return new(HttpParseStatus.Failure, FailureStatus: 400, FailureMessage: "Invalid Content-Length header");
             if (contentLength > FileMcpConstants.MaxHttpRequestBodyBytes) return new(HttpParseStatus.Failure, FailureStatus: 413, FailureMessage: "Payload too large");
         }
-        if (!headers.TryGetValue(FileMcpConstants.LocalAuthHeaderName, out var token) || !ConstantTimeEquals(token, _localAuthToken)) return new(HttpParseStatus.Failure, FailureStatus: 401, FailureMessage: "Unauthorized");
+        var method = parts[0].ToUpperInvariant();
+        var path = parts[1].Split('?', 2)[0];
+        var isUnauthenticatedOAuthDiscovery = method == "GET" && contentLength == 0 && UnauthenticatedOAuthDiscoveryPaths.Contains(path);
+        if (!isUnauthenticatedOAuthDiscovery &&
+            (!headers.TryGetValue(FileMcpConstants.LocalAuthHeaderName, out var token) || !ConstantTimeEquals(token, _localAuthToken)))
+            return new(HttpParseStatus.Failure, FailureStatus: 401, FailureMessage: "Unauthorized");
 
         var bodyStart = headerEnd + separator.Length; var available = data.Length - bodyStart;
         if (available < contentLength) return new(HttpParseStatus.Incomplete);
         if (available != contentLength) return new(HttpParseStatus.Failure, FailureStatus: 400, FailureMessage: "Unexpected bytes after request body");
-        var body = data.AsSpan(bodyStart, contentLength).ToArray(); var path = parts[1].Split('?', 2)[0];
-        return new(HttpParseStatus.Request, new HttpRequestData(parts[0].ToUpperInvariant(), path, headers, body));
+        var body = data.AsSpan(bodyStart, contentLength).ToArray();
+        return new(HttpParseStatus.Request, new HttpRequestData(method, path, headers, body));
     }
 
     private async Task<byte[]> ProcessAsync(HttpRequestData request, CancellationToken cancellationToken)

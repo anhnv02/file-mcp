@@ -199,7 +199,7 @@ FileMCP intentionally treats the local workspace as a privileged boundary.
 
 - The MCP server binds only to `127.0.0.1`.
 - Every runtime start creates a fresh 256-bit local token. `tunnel-client` resolves that token through `env:FILEMCP_LOCAL_AUTH_TOKEN` and injects it only on requests to the local MCP origin.
-- Missing or incorrect local-auth tokens are rejected before request bodies are accepted. The token is not persisted in the generated tunnel profile and is redacted from FileMCP logs/errors.
+- Missing or incorrect local-auth tokens are rejected before request bodies are accepted. The only exception is a bodyless `GET` to either standard OAuth Protected Resource Metadata discovery path; because FileMCP does not advertise OAuth, those requests return `404 Not Found` without exposing workspace data. The token is not persisted in the generated tunnel profile and is redacted from FileMCP logs/errors.
 - The `tunnel-client` health/admin listener is restricted to `localhost`, `127.0.0.1`, or `[::1]`; FileMCP rejects public/LAN bind addresses.
 - HTTP requires a valid `Host`, validates `Origin`, rejects malformed header names/values and inconsistent body framing, and bounds request headers/bodies.
 - Processes running with the same OS-user privileges (or an administrator/root-equivalent context) remain inside the local trust boundary; the per-runtime token is defense in depth, not an OS sandbox.

@@ -507,6 +507,27 @@ UNAUTHENTICATED="$(command curl -sS -i -X POST "$BASE_URL" \
 printf '%s' "$UNAUTHENTICATED" | grep -q 'HTTP/1.1 401 Unauthorized'
 printf '%s' "$UNAUTHENTICATED" | grep -q 'Unauthorized'
 
+DISCOVERY_PATH="$(command curl -sS -i 'http://127.0.0.1:18088/.well-known/oauth-protected-resource/mcp')"
+printf '%s' "$DISCOVERY_PATH" | grep -q 'HTTP/1.1 404 Not Found'
+printf '%s' "$DISCOVERY_PATH" | grep -q 'Not found'
+
+DISCOVERY_ROOT="$(command curl -sS -i 'http://127.0.0.1:18088/.well-known/oauth-protected-resource')"
+printf '%s' "$DISCOVERY_ROOT" | grep -q 'HTTP/1.1 404 Not Found'
+
+UNAUTHENTICATED_UNKNOWN_PATH="$(command curl -sS -i 'http://127.0.0.1:18088/not-found')"
+printf '%s' "$UNAUTHENTICATED_UNKNOWN_PATH" | grep -q 'HTTP/1.1 401 Unauthorized'
+
+UNAUTHENTICATED_DISCOVERY_POST="$(command curl -sS -i -X POST 'http://127.0.0.1:18088/.well-known/oauth-protected-resource/mcp')"
+printf '%s' "$UNAUTHENTICATED_DISCOVERY_POST" | grep -q 'HTTP/1.1 401 Unauthorized'
+
+DOCTOR_RESULT="$(CONTROL_PLANE_API_KEY=dummy-key "$TUNNEL_BIN" doctor \
+    --control-plane.tunnel-id tunnel_0123456789abcdef0123456789abcdef \
+    --mcp.server-url "$BASE_URL" \
+    --health.listen-addr 127.0.0.1:0 2>&1)"
+printf '%s' "$DOCTOR_RESULT" | grep -Eq 'CHECK oauth_metadata +PASS OAuth metadata not advertised'
+printf '%s' "$DOCTOR_RESULT" | grep -q 'RESULT ok'
+echo "tunnel-client-doctor-no-auth-oauth-discovery: ok"
+
 WRONG_LOCAL_TOKEN="$(command curl -sS -i -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
     -H 'X-FileMCP-Local-Token: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \

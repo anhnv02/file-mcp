@@ -29,6 +29,10 @@ private let maxHTTPRequestHeaderBytes = 64_000
 private let maxHTTPRequestBodyBytes = 8_000_000
 let fileMCPLocalAuthHeaderName = "X-FileMCP-Local-Token"
 private let fileMCPLocalAuthHeaderKey = fileMCPLocalAuthHeaderName.lowercased()
+private let unauthenticatedOAuthDiscoveryPaths: Set<String> = [
+    "/.well-known/oauth-protected-resource/mcp",
+    "/.well-known/oauth-protected-resource",
+]
 private let singleValueHTTPRequestHeaders: Set<String> = [
     "content-length", "content-type", "host", "origin",
     "mcp-protocol-version", "mcp-method", "mcp-name", "transfer-encoding",
@@ -1710,9 +1714,16 @@ final class LocalMCPServer {
             contentLength = 0
         }
 
-        guard let providedToken = headers[fileMCPLocalAuthHeaderKey],
-              constantTimeEquals(providedToken, localAuthToken) else {
-            return .failure(status: 401, message: "Unauthorized")
+        let method = parts[0].uppercased()
+        let path = parts[1].split(separator: "?", maxSplits: 1).first.map(String.init) ?? parts[1]
+        let isUnauthenticatedOAuthDiscovery = method == "GET"
+            && contentLength == 0
+            && unauthenticatedOAuthDiscoveryPaths.contains(path)
+        if !isUnauthenticatedOAuthDiscovery {
+            guard let providedToken = headers[fileMCPLocalAuthHeaderKey],
+                  constantTimeEquals(providedToken, localAuthToken) else {
+                return .failure(status: 401, message: "Unauthorized")
+            }
         }
 
         let bodyStart = headerRange.upperBound
@@ -1723,8 +1734,7 @@ final class LocalMCPServer {
         }
         let bodyEnd = bodyStart + contentLength
         let body = data.subdata(in: bodyStart..<bodyEnd)
-        let path = parts[1].split(separator: "?", maxSplits: 1).first.map(String.init) ?? parts[1]
-        return .request(HTTPRequest(method: parts[0].uppercased(), path: path, headers: headers, body: body))
+        return .request(HTTPRequest(method: method, path: path, headers: headers, body: body))
     }
 
     private func isValidHTTPHeaderName(_ value: String) -> Bool {
