@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>FileMCP</AssemblyName>
+    <RootNamespace>FileMCP.App</RootNamespace>
+    <Version>0.4.0</Version>
+    <ApplicationIcon>..\..\assets\filemcp.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FileMCP.Core\FileMCP.Core.csproj" />
+    <Resource Include="..\..\assets\filemcp.ico" Link="Assets\filemcp.ico" />
+  </ItemGroup>
+</Project>

@@ -9,14 +9,16 @@ The repository has private development history from before its open-source publi
 ### Added
 
 - Open-source project license and contribution/security documentation.
-- GitHub Actions macOS CI verification.
+- GitHub Actions macOS and Windows CI verification.
 - Reproducible source-archive packaging from tracked Git content only.
 - Explicit provenance and checksum documentation for the vendored OpenAI `tunnel-client` binary.
 - New FileMCP macOS app icon optimized for the Dock.
+- Native Windows application with WPF UI, system-tray lifecycle, Windows Credential Manager storage, and x64/ARM64 release packaging.
+- Windows parity integration coverage for filesystem containment, NTFS junction/reparse points, Git safe mode, Job Object process cleanup, MCP legacy/modern protocols, and tunnel runtime lifecycle.
 
 ### Changed
 
-- Updated the bundled OpenAI `tunnel-client` to v0.0.12 with upstream NOTICE and third-party license evidence.
+- Updated the bundled OpenAI `tunnel-client` to v0.0.12 with upstream NOTICE and third-party license evidence, including official Windows AMD64/ARM64 binaries.
 - Rebranded the macOS app and MCP server identity from Local Files MCP to FileMCP.
 - Updated the app bundle/executable names, default profile, default shared folder, documentation, and release artifact naming for FileMCP.
 - Removed the persistent menu-bar status item; FileMCP now relies on the Dock and the standard macOS application menu.
@@ -27,5 +29,5 @@ The repository has private development history from before its open-source publi
 - Added a fresh per-runtime 256-bit token between `tunnel-client` and the loopback MCP server; the token is referenced through an environment indirection, not persisted in generated tunnel profiles, and redacted from logs/errors.
 - Restricted the `tunnel-client` health/admin listener to loopback, isolated FileMCP tunnel profiles under Application Support, and allowlisted the child tunnel environment to prevent ambient config overrides.
 - Hardened Git safe mode across Git/config/common/object/alternate metadata, repository config includes, embedded repositories, external init templates, HTTP credential/TLS file settings, credential helpers, SSH config execution paths, and MCP-internal TOCTOU races.
-- Hardened process execution by validating POSIX strings before spawn, removing a `FileHandle` close/read race, and cleaning up descendant process groups when managed parents exit.
+- Hardened process execution by validating launch inputs before spawn and cleaning descendant process trees on parent exit, timeout, stop, and shutdown (POSIX process groups on macOS; Job Objects on Windows).
 - HTTP malformed-request fuzz iterations can be reduced through `MCP_HTTP_FUZZ_ITERATIONS` for targeted development/CI runs while preserving the full default count.

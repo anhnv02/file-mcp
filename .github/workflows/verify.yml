@@ -2,8 +2,6 @@ name: Verify
 
 on:
   push:
-    branches:
-      - main
   pull_request:
 
 permissions:
@@ -59,3 +57,84 @@ jobs:
           cmp vendor/tunnel-client/LICENSE dist/FileMCP.app/Contents/Resources/tunnel-client-LICENSE.txt
           cmp vendor/tunnel-client/NOTICE dist/FileMCP.app/Contents/Resources/tunnel-client-NOTICE.txt
           cmp vendor/tunnel-client/darwin-arm64/THIRD-PARTY-LICENSES.txt dist/FileMCP.app/Contents/Resources/tunnel-client-THIRD-PARTY-LICENSES.txt
+
+  verify-windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      MCP_HTTP_FUZZ_ITERATIONS: "40"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Verify vendored tunnel-client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((Get-Content vendor/tunnel-client/VERSION -Raw).Trim() -ne "0.0.12") { throw "Unexpected tunnel-client version." }
+          if ((Get-FileHash vendor/tunnel-client/windows-amd64/tunnel-client.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne "6649169733686805ca16cccd91774594d0c017fd729c37ad4ce1cd18323d9ae8") { throw "windows-amd64 tunnel-client checksum mismatch." }
+          if ((Get-FileHash vendor/tunnel-client/windows-arm64/tunnel-client.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne "480684ec1031fc2985c7e87f9d669e7dfda4012a8ecdab21eabe1b5deafdd656") { throw "windows-arm64 tunnel-client checksum mismatch." }
+          $version = & vendor/tunnel-client/windows-amd64/tunnel-client.exe --version
+          if ($version -notmatch '^0\.0\.12\+881c9a8fed7cccbe6607cd419863bbca506b8215 ') { throw "Unexpected tunnel-client version output: $version" }
+          if (-not (Test-Path vendor/tunnel-client/NOTICE -PathType Leaf)) { throw "Missing NOTICE." }
+          if (-not (Test-Path vendor/tunnel-client/windows-amd64/THIRD-PARTY-LICENSES.txt -PathType Leaf)) { throw "Missing windows-amd64 license sidecar." }
+          if (-not (Test-Path vendor/tunnel-client/windows-arm64/THIRD-PARTY-LICENSES.txt -PathType Leaf)) { throw "Missing windows-arm64 license sidecar." }
+
+      - name: Build Windows solution
+        shell: pwsh
+        run: dotnet build windows/FileMCP.Windows.sln -c Release -warnaserror
+
+      - name: Windows integration tests
+        shell: pwsh
+        run: ./tests/test_windows_runtime.ps1
+
+      - name: Build Windows x64 release
+        shell: pwsh
+        run: ./build_windows_app.ps1 -Architecture x64
+
+      - name: Build Windows arm64 release
+        shell: pwsh
+        run: ./build_windows_app.ps1 -Architecture arm64
+
+      - name: Windows app smoke test
+        shell: pwsh
+        run: ./tests/test_windows_app.ps1
+
+      - name: Verify Windows release resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Assert-SameFile([string]$Expected, [string]$Actual) {
+            if ((Get-FileHash $Expected -Algorithm SHA256).Hash -ne (Get-FileHash $Actual -Algorithm SHA256).Hash) {
+              throw "Release file mismatch: $Expected vs $Actual"
+            }
+          }
+          foreach ($arch in @("x64", "arm64")) {
+            $root = "dist/windows-$arch/FileMCP"
+            if (-not (Test-Path "$root/FileMCP.exe" -PathType Leaf)) { throw "Missing FileMCP.exe for $arch." }
+            if (-not (Test-Path "$root/tunnel-client.exe" -PathType Leaf)) { throw "Missing tunnel-client.exe for $arch." }
+            Assert-SameFile LICENSE "$root/FileMCP-LICENSE.txt"
+            Assert-SameFile vendor/tunnel-client/LICENSE "$root/tunnel-client-LICENSE.txt"
+            Assert-SameFile vendor/tunnel-client/NOTICE "$root/tunnel-client-NOTICE.txt"
+            $vendorTag = if ($arch -eq "arm64") { "windows-arm64" } else { "windows-amd64" }
+            Assert-SameFile "vendor/tunnel-client/$vendorTag/THIRD-PARTY-LICENSES.txt" "$root/tunnel-client-THIRD-PARTY-LICENSES.txt"
+          }
+
+      - name: Upload Windows x64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileMCP-windows-x64
+          path: dist/FileMCP-v0.4.0-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload Windows ARM64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileMCP-windows-arm64
+          path: dist/FileMCP-v0.4.0-windows-arm64.zip
+          if-no-files-found: error
