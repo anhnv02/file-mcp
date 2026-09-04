@@ -47,3 +47,10 @@ Changes involving any of the following deserve explicit security review:
 ## Secrets in reports and tests
 
 Use fake credentials in examples and tests. Never attach a real `.env`, `.oauth_store.json`, API key, tunnel credential, repository credential, credential-store export, or archive of a developer working directory.
+
+
+## Codex project skills
+
+Codex project skills are treated as workspace-controlled instructions, not trusted application code. FileMCP only discovers direct child skill directories under `.agents/skills` and loads the exact `SKILL.md` selected by name. Skill loading is read-only, refuses path traversal and symlink/reparse-point escapes, requires valid UTF-8, and rejects files larger than 256 KB instead of truncating them.
+
+Loading a skill does not grant new capabilities by itself. A `SKILL.md` can ask the model to use existing FileMCP tools, including `run_command` when the user has explicitly enabled shell execution, so users should review skills in untrusted repositories before invoking them. FileMCP logs skill discovery/loading metadata but does not copy the full skill instructions into application logs.

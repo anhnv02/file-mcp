@@ -15,6 +15,8 @@ The repository has private development history from before its open-source publi
 - New FileMCP macOS app icon optimized for the Dock.
 - Native Windows application with WPF UI, system-tray lifecycle, Windows Credential Manager storage, and x64/ARM64 release packaging.
 - Windows parity integration coverage for filesystem containment, NTFS junction/reparse points, Git safe mode, Job Object process cleanup, MCP legacy/modern protocols, and tunnel runtime lifecycle.
+- Codex project-skill discovery and loading from `.agents/skills/<name>/SKILL.md` through the read-only `list_codex_skills` and `load_codex_skill` MCP tools.
+- Skill lifecycle logging with `[Skills]` messages for scan, discovery, loading, validation failures, and missing skills.
 
 ### Changed
 
@@ -31,3 +33,4 @@ The repository has private development history from before its open-source publi
 - Hardened Git safe mode across Git/config/common/object/alternate metadata, repository config includes, embedded repositories, external init templates, HTTP credential/TLS file settings, credential helpers, SSH config execution paths, and MCP-internal TOCTOU races.
 - Hardened process execution by validating launch inputs before spawn and cleaning descendant process trees on parent exit, timeout, stop, and shutdown (POSIX process groups on macOS; Job Objects on Windows).
 - HTTP malformed-request fuzz iterations can be reduced through `MCP_HTTP_FUZZ_ITERATIONS` for targeted development/CI runs while preserving the full default count.
+- Improved the macOS Logs view so buffered runtime and skill logs render reliably after connecting or switching to the Logs tab.

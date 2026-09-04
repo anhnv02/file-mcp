@@ -26,6 +26,7 @@ public sealed class LocalMcpServer : IAsyncDisposable
     private readonly ushort _port;
     private readonly string _localAuthToken;
     private readonly LocalTools _tools;
+    private readonly CodexSkillRegistry _skills;
     private readonly Action<string> _log;
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -36,6 +37,7 @@ public sealed class LocalMcpServer : IAsyncDisposable
         if (Encoding.UTF8.GetByteCount(localAuthToken) < 32) throw new FileMcpException("Local MCP authentication token is too short");
         _port = port; _localAuthToken = localAuthToken; _log = log;
         _tools = new LocalTools(allowedDirectory, gitUserName, gitUserEmail, enableCommands);
+        _skills = new CodexSkillRegistry(allowedDirectory, log);
     }
 
     public bool IsReady { get; private set; }
@@ -50,7 +52,8 @@ public sealed class LocalMcpServer : IAsyncDisposable
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             IsReady = true;
             _acceptLoop = AcceptLoopAsync(_cts.Token);
-            _log($"MCP server listening on http://127.0.0.1:{_port}/mcp\n");
+            _log($"[MCP] Server listening on http://127.0.0.1:{_port}/mcp\n");
+            _skills.Refresh();
             return Task.CompletedTask;
         }
         catch (SocketException ex)
@@ -103,7 +106,7 @@ public sealed class LocalMcpServer : IAsyncDisposable
                     }
                     catch
                     {
-                        _log("ERROR: MCP request processing failed.\n");
+                        _log("[MCP] ERROR: request processing failed.\n");
                         response = JsonRpcError(null, -32603, "Internal error", status: 500);
                     }
                     await stream.WriteAsync(response, cancellationToken).ConfigureAwait(false);
@@ -218,36 +221,56 @@ public sealed class LocalMcpServer : IAsyncDisposable
     {
         "initialize" => JsonRpcResult(id, new JsonObject { ["protocolVersion"] = NegotiateLegacy(parameters["protocolVersion"]?.GetValue<string>()), ["capabilities"] = ServerCapabilities(), ["serverInfo"] = ServerInfo() }),
         "ping" => JsonRpcResult(id, new JsonObject()),
-        "tools/list" => JsonRpcResult(id, new JsonObject { ["tools"] = _tools.ToolDefinitions }),
+        "tools/list" => JsonRpcResult(id, new JsonObject { ["tools"] = AllToolDefinitions() }),
         "tools/call" => await CallToolAsync(id, parameters, false, cancellationToken).ConfigureAwait(false),
         _ => JsonRpcError(id, -32601, $"Method not found: {method}"),
     };
 
     private async Task<byte[]> ProcessModernRequestAsync(JsonNode? id, string method, JsonObject parameters, CancellationToken cancellationToken)
     {
-        if (method == "server/discover") { var result = ModernComplete(new JsonObject { ["supportedVersions"] = new JsonArray(FileMcpConstants.ModernProtocolVersion), ["capabilities"] = ServerCapabilities(), ["instructions"] = "Read and manage files, Git repositories, and optionally local commands inside the configured shared directory." }); result["ttlMs"] = 60_000; result["cacheScope"] = "private"; return JsonRpcResult(id, result); }
+        if (method == "server/discover")
+        {
+            var result = ModernComplete(new JsonObject
+            {
+                ["supportedVersions"] = new JsonArray(FileMcpConstants.ModernProtocolVersion),
+                ["capabilities"] = ServerCapabilities(),
+                ["instructions"] = "Read and manage files, Git repositories, Codex project skills, and optionally local commands inside the configured shared directory. When a user message begins with '/<skill-name>', call load_codex_skill with that exact name before answering and follow the returned SKILL.md instructions.",
+            });
+            result["ttlMs"] = 60_000; result["cacheScope"] = "private"; return JsonRpcResult(id, result);
+        }
         if (method == "ping") return JsonRpcResult(id, ModernComplete(new JsonObject()));
-        if (method == "tools/list") { var result = ModernComplete(new JsonObject { ["tools"] = _tools.ToolDefinitions }); result["ttlMs"] = 30_000; result["cacheScope"] = "private"; return JsonRpcResult(id, result); }
+        if (method == "tools/list") { var result = ModernComplete(new JsonObject { ["tools"] = AllToolDefinitions() }); result["ttlMs"] = 30_000; result["cacheScope"] = "private"; return JsonRpcResult(id, result); }
         if (method == "tools/call") return await CallToolAsync(id, parameters, true, cancellationToken).ConfigureAwait(false);
         return JsonRpcError(id, -32601, $"Method not found: {method}", status: 404);
+    }
+
+    private JsonArray AllToolDefinitions()
+    {
+        var result = new JsonArray();
+        foreach (var tool in _tools.ToolDefinitions) result.Add(tool?.DeepClone());
+        foreach (var tool in _skills.ToolDefinitions) result.Add(tool?.DeepClone());
+        return result;
     }
 
     private async Task<byte[]> CallToolAsync(JsonNode? id, JsonObject parameters, bool modern, CancellationToken cancellationToken)
     {
         if (parameters["name"] is not JsonValue nameNode || !nameNode.TryGetValue<string>(out var name)) return JsonRpcError(id, -32602, "Missing tool name", status: modern ? 400 : 200);
-        if (!_tools.HasTool(name)) return JsonRpcError(id, -32602, $"Unknown tool: {name}");
+        if (!_tools.HasTool(name) && !_skills.HasTool(name)) return JsonRpcError(id, -32602, $"Unknown tool: {name}");
         JsonObject arguments;
         if (parameters["arguments"] is null) arguments = new JsonObject();
         else if (parameters["arguments"] is JsonObject obj) arguments = obj;
         else { var invalid = new JsonObject { ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = "Invalid arguments: expected an object" }), ["isError"] = true }; if (modern) invalid = ModernComplete(invalid); return JsonRpcResult(id, invalid); }
         try
         {
-            var output = await _tools.CallAsync(name, arguments, cancellationToken).ConfigureAwait(false);
+            var output = _skills.HasTool(name)
+                ? _skills.Call(name, arguments)
+                : await _tools.CallAsync(name, arguments, cancellationToken).ConfigureAwait(false);
             var result = new JsonObject { ["content"] = output.Content, ["structuredContent"] = output.StructuredContent, ["isError"] = false };
             if (modern) result = ModernComplete(result); return JsonRpcResult(id, result);
         }
         catch (Exception ex)
         {
+            if (_skills.HasTool(name)) _log($"[Skills] ERROR: {ex.Message}\n");
             var result = new JsonObject { ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = ex.Message }), ["isError"] = true };
             if (modern) result = ModernComplete(result); return JsonRpcResult(id, result);
         }

@@ -239,7 +239,23 @@ internal static class Program
 
         var legacy = await SendHttpAsync(port, "POST", "/mcp", AuthHeaders(token), "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}");
         var legacyBody = JsonNode.Parse(HttpBody(legacy))!.AsObject();
-        Assert(legacyBody["result"]!["tools"]!.AsArray().Count == 15, "legacy tools list");
+        var legacyTools = legacyBody["result"]!["tools"]!.AsArray();
+        Assert(legacyTools.Count == 17, "legacy tools list");
+        Assert(legacyTools.Any(t => t!["name"]!.GetValue<string>() == "list_codex_skills"), "legacy list_codex_skills exposed");
+        Assert(legacyTools.Any(t => t!["name"]!.GetValue<string>() == "load_codex_skill"), "legacy load_codex_skill exposed");
+
+        var skillDir = Path.Combine(workspace, ".agents", "skills", "speckit-analyze");
+        Directory.CreateDirectory(skillDir);
+        File.WriteAllText(Path.Combine(skillDir, "SKILL.md"), "---\nname: speckit-analyze\ndescription: Analyze the current spec.\n---\n\n# Analyze\nFollow this skill exactly.\n", new UTF8Encoding(false));
+        var loadSkill = await SendHttpAsync(port, "POST", "/mcp", AuthHeaders(token), "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"load_codex_skill\",\"arguments\":{\"name\":\"speckit-analyze\"}}}");
+        var loadedSkillBody = JsonNode.Parse(HttpBody(loadSkill))!.AsObject();
+        var loadedSkill = loadedSkillBody["result"]!["structuredContent"]!.AsObject();
+        Assert(loadedSkill["name"]!.GetValue<string>() == "speckit-analyze", "load skill name");
+        Assert(loadedSkill["instructions"]!.GetValue<string>().Contains("Follow this skill exactly.", StringComparison.Ordinal), "load skill instructions");
+
+        var invalidSkill = await SendHttpAsync(port, "POST", "/mcp", AuthHeaders(token), "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"load_codex_skill\",\"arguments\":{\"name\":\"../escape\"}}}");
+        var invalidSkillBody = JsonNode.Parse(HttpBody(invalidSkill))!.AsObject();
+        Assert(invalidSkillBody["result"]!["isError"]!.GetValue<bool>(), "unsafe skill name refused");
 
         var modernHeaders = AuthHeaders(token); modernHeaders["MCP-Protocol-Version"] = FileMcpConstants.ModernProtocolVersion; modernHeaders["Mcp-Method"] = "tools/list";
         var modernBody = new JsonObject
@@ -250,7 +266,7 @@ internal static class Program
         var modern = await SendHttpAsync(port, "POST", "/mcp", modernHeaders, modernBody.ToJsonString());
         var modernJson = JsonNode.Parse(HttpBody(modern))!.AsObject();
         Assert(modernJson["result"]!["resultType"]!.GetValue<string>() == "complete", "modern result type");
-        Assert(modernJson["result"]!["tools"]!.AsArray().Count == 15, "modern tools list");
+        Assert(modernJson["result"]!["tools"]!.AsArray().Count == 17, "modern tools list");
 
         var badHost = await SendHttpAsync(port, "POST", "/mcp", AuthHeaders(token), "", host: "evil.example");
         Assert(badHost.StartsWith("HTTP/1.1 403 Forbidden", StringComparison.Ordinal), "host validation");
@@ -277,6 +293,7 @@ internal static class Program
             Assert(!captureText.Contains("LOG_HTTP_RAW_UNSAFE=true", StringComparison.Ordinal) && !captureText.Contains("MCP_SERVER_URL=http://evil", StringComparison.Ordinal), "dangerous tunnel env not inherited");
             Assert(!logs.ToString().Contains("sk-runtime-test-secret", StringComparison.Ordinal), "api key redacted");
             Assert(!System.Text.RegularExpressions.Regex.IsMatch(logs.ToString(), "[0-9a-f]{64}"), "local token redacted");
+            Assert(logs.ToString().Contains("[Skills]", StringComparison.Ordinal), "skill scan logged on connect");
             await runtime.StopAsync();
             Assert(runtime.State.Status == LocalMcpRuntimeStatus.Stopped, "runtime stopped");
         }

@@ -64,6 +64,7 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
             if (State.Status is not (LocalMcpRuntimeStatus.Stopped or LocalMcpRuntimeStatus.Failed)) return;
             if (_requestedStop) { _requestedStop = false; SetState(LocalMcpRuntimeState.Stopped); return; }
             SetState(LocalMcpRuntimeState.Starting);
+            EmitLog("[Runtime] Starting FileMCP...\n");
             _startupCts?.Dispose(); _startupCts = new CancellationTokenSource();
             var cancellationToken = _startupCts.Token;
             try
@@ -80,13 +81,13 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
                 environment["MCP_EXTRA_HEADERS"] = localAuthHeader; environment["MCP_DISCOVERY_EXTRA_HEADERS"] = localAuthHeader;
                 string[] sensitive = [configuration.ApiKey, localAuthToken];
 
-                EmitLog("Configuring Secure MCP Tunnel…\n");
+                EmitLog("[Tunnel] Configuring Secure MCP Tunnel…\n");
                 var initResult = await ProcessRunner.RunAsync(tunnelClient,
                     ["init", "--sample", "sample_mcp_remote_no_auth", "--profile", configuration.Profile, "--profile-dir", profileDirectory, "--force", "--tunnel-id", configuration.TunnelId, "--mcp-server-url", $"http://127.0.0.1:{configuration.Port}/mcp", "--health-listen-addr", healthAddress],
                     environment: environment, timeoutSeconds: 30, outputLimitBytes: 250_000, cancellationToken: cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested(); RequireSuccess(initResult, "tunnel-client init", sensitive);
 
-                EmitLog("Checking tunnel configuration…\n");
+                EmitLog("[Tunnel] Checking tunnel configuration…\n");
                 var doctorResult = await ProcessRunner.RunAsync(tunnelClient,
                     ["doctor", "--profile", configuration.Profile, "--profile-dir", profileDirectory, "--health-listen-addr", healthAddress, "--explain"],
                     environment: environment, timeoutSeconds: 30, outputLimitBytes: 250_000, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -95,10 +96,10 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
                 _tunnelProcess = ProcessRunner.StartManaged(tunnelClient,
                     ["run", "--profile", configuration.Profile, "--profile-dir", profileDirectory, "--health-listen-addr", healthAddress],
                     null, environment,
-                    text => EmitLog(Redact(text, sensitive)),
+                    text => EmitLog("[Tunnel] " + Redact(text, sensitive)),
                     exitCode => _ = Task.Run(() => TunnelDidExitAsync(exitCode)));
                 SetState(LocalMcpRuntimeState.Running);
-                EmitLog($"OpenAI Secure MCP Tunnel started. Command execution: {(configuration.EnableCommands ? "enabled" : "disabled")}.\n");
+                EmitLog($"[Runtime] OpenAI Secure MCP Tunnel started. Command execution: {(configuration.EnableCommands ? "enabled" : "disabled")}.\n");
             }
             catch (OperationCanceledException) when (_requestedStop || _startupCts?.IsCancellationRequested == true)
             {
@@ -108,7 +109,7 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
             {
                 CleanupRuntime();
                 SetState(LocalMcpRuntimeState.Failed(ex.Message));
-                EmitLog("ERROR: " + ex.Message + "\n");
+                EmitLog("[Runtime] ERROR: " + ex.Message + "\n");
             }
         }
         finally { _serial.Release(); }
@@ -122,6 +123,7 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
         {
             if (State.Status == LocalMcpRuntimeStatus.Stopped) { _requestedStop = false; return; }
             if (State.Status != LocalMcpRuntimeStatus.Stopping) SetState(LocalMcpRuntimeState.Stopping);
+            EmitLog("[Runtime] Disconnecting...\n");
             if (_tunnelProcess is not null) await _tunnelProcess.StopAsync().ConfigureAwait(false);
             FinishStop();
         }
@@ -143,16 +145,16 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
         {
             if (_tunnelProcess is null && State.Status == LocalMcpRuntimeStatus.Stopped) return;
             _tunnelProcess?.Dispose(); _tunnelProcess = null; _server?.Stop(); _server = null; _profileLock?.Dispose(); _profileLock = null;
-            if (_requestedStop) { _requestedStop = false; SetState(LocalMcpRuntimeState.Stopped); EmitLog("Tunnel stopped.\n"); }
-            else if (exitCode == 0) { SetState(LocalMcpRuntimeState.Stopped); EmitLog("Tunnel stopped.\n"); }
-            else { var message = $"Tunnel stopped unexpectedly (exit status {exitCode})."; SetState(LocalMcpRuntimeState.Failed(message)); EmitLog(message + "\n"); }
+            if (_requestedStop) { _requestedStop = false; SetState(LocalMcpRuntimeState.Stopped); EmitLog("[Runtime] Tunnel stopped.\n"); }
+            else if (exitCode == 0) { SetState(LocalMcpRuntimeState.Stopped); EmitLog("[Runtime] Tunnel stopped.\n"); }
+            else { var message = $"Tunnel stopped unexpectedly (exit status {exitCode})."; SetState(LocalMcpRuntimeState.Failed(message)); EmitLog("[Runtime] " + message + "\n"); }
         }
         finally { _serial.Release(); }
     }
 
     private void FinishStop()
     {
-        CleanupRuntime(); _requestedStop = false; SetState(LocalMcpRuntimeState.Stopped); EmitLog("Tunnel stopped.\n");
+        CleanupRuntime(); _requestedStop = false; SetState(LocalMcpRuntimeState.Stopped); EmitLog("[Runtime] Tunnel stopped.\n");
     }
 
     private void CleanupRuntime()
@@ -215,8 +217,8 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
     {
         if (result.TimedOut) throw new FileMcpException(operation + " timed out.");
         if (result.ExitCode != 0) throw new FileMcpException(operation + " failed: " + Redact(string.IsNullOrEmpty(result.Stderr) ? result.Stdout : result.Stderr, sensitive));
-        if (result.Stdout.Length > 0) EmitLog(Redact(result.Stdout, sensitive) + (result.Stdout.EndsWith('\n') ? "" : "\n"));
-        if (result.Stderr.Length > 0) EmitLog(Redact(result.Stderr, sensitive) + (result.Stderr.EndsWith('\n') ? "" : "\n"));
+        if (result.Stdout.Length > 0) EmitLog("[Tunnel] " + Redact(result.Stdout, sensitive) + (result.Stdout.EndsWith('\n') ? "" : "\n"));
+        if (result.Stderr.Length > 0) EmitLog("[Tunnel] " + Redact(result.Stderr, sensitive) + (result.Stderr.EndsWith('\n') ? "" : "\n"));
     }
 
     private static string Redact(string text, IReadOnlyList<string> sensitive) { foreach (var secret in sensitive.Where(s => s.Length > 0)) text = text.Replace(secret, "[REDACTED]", StringComparison.Ordinal); return text; }
