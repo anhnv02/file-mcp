@@ -1516,6 +1516,7 @@ final class LocalMCPServer {
     private let port: UInt16
     private let localAuthToken: String
     private let tools: LocalTools
+    private let skills: CodexSkillRegistry
     private let log: (String) -> Void
     private let listenerQueue = DispatchQueue(label: "com.filemcp.http-listener", qos: .userInitiated)
     private let workQueue = DispatchQueue(label: "com.filemcp.http-workers", qos: .userInitiated, attributes: .concurrent)
@@ -1545,6 +1546,7 @@ final class LocalMCPServer {
             gitUserEmail: gitUserEmail,
             enableCommands: enableCommands
         )
+        self.skills = try CodexSkillRegistry(rootPath: allowedDirectory, log: log)
     }
 
     var isReady: Bool {
@@ -1592,7 +1594,8 @@ final class LocalMCPServer {
             stop()
             throw MCPServerError.operationFailed("Cannot listen on port \(port): \(startError.localizedDescription)")
         }
-        log("MCP server listening on http://127.0.0.1:\(port)/mcp\n")
+        log("[MCP] Server listening on http://127.0.0.1:\(port)/mcp\n")
+        skills.refresh()
     }
 
     func stop() {
@@ -1854,6 +1857,10 @@ final class LocalMCPServer {
         }
     }
 
+    private func allToolDefinitions() -> [[String: Any]] {
+        tools.toolDefinitions + skills.toolDefinitions
+    }
+
     private func processLegacyRequest(id: Any, method: String, params: [String: Any]) -> Data {
         switch method {
         case "initialize":
@@ -1869,7 +1876,7 @@ final class LocalMCPServer {
         case "ping":
             return jsonRPCResult(id: id, result: [:])
         case "tools/list":
-            return jsonRPCResult(id: id, result: ["tools": tools.toolDefinitions])
+            return jsonRPCResult(id: id, result: ["tools": allToolDefinitions()])
         case "tools/call":
             return callTool(id: id, params: params, modern: false)
         default:
@@ -1883,14 +1890,14 @@ final class LocalMCPServer {
             var result = modernCompleteResult([
                 "supportedVersions": [mcpModernProtocolVersion],
                 "capabilities": serverCapabilities(),
-                "instructions": "Read and manage files, Git repositories, and optionally local commands inside the configured shared directory.",
+                "instructions": "Read and manage files, Git repositories, Codex project skills, and optionally local commands inside the configured shared directory. When a user message begins with '/<skill-name>', call load_codex_skill with that exact name before answering and follow the returned SKILL.md instructions.",
             ])
             addCacheMetadata(to: &result, ttlMs: 60_000)
             return jsonRPCResult(id: id, result: result)
         case "ping":
             return jsonRPCResult(id: id, result: modernCompleteResult([:]))
         case "tools/list":
-            var result = modernCompleteResult(["tools": tools.toolDefinitions])
+            var result = modernCompleteResult(["tools": allToolDefinitions()])
             addCacheMetadata(to: &result, ttlMs: 30_000)
             return jsonRPCResult(id: id, result: result)
         case "tools/call":
@@ -1914,7 +1921,7 @@ final class LocalMCPServer {
                 status: modern ? 400 : 200
             )
         }
-        guard tools.hasTool(named: toolName) else {
+        guard tools.hasTool(named: toolName) || skills.hasTool(named: toolName) else {
             return jsonRPCError(id: id, code: -32602, message: "Unknown tool: \(toolName)")
         }
         let arguments: [String: Any]
@@ -1932,15 +1939,28 @@ final class LocalMCPServer {
             arguments = [:]
         }
         do {
-            let output = try tools.call(name: toolName, arguments: arguments)
+            let content: [[String: Any]]
+            let structuredContent: [String: Any]
+            if skills.hasTool(named: toolName) {
+                let output = try skills.call(name: toolName, arguments: arguments)
+                content = output.content
+                structuredContent = output.structuredContent
+            } else {
+                let output = try tools.call(name: toolName, arguments: arguments)
+                content = output.content
+                structuredContent = output.structuredContent
+            }
             var result: [String: Any] = [
-                "content": output.content,
-                "structuredContent": output.structuredContent,
+                "content": content,
+                "structuredContent": structuredContent,
                 "isError": false,
             ]
             if modern { result = modernCompleteResult(result) }
             return jsonRPCResult(id: id, result: result)
         } catch {
+            if skills.hasTool(named: toolName) {
+                log("[Skills] ERROR: \(error.localizedDescription)\n")
+            }
             var result: [String: Any] = [
                 "content": [["type": "text", "text": error.localizedDescription]],
                 "isError": true,
@@ -1970,48 +1990,26 @@ final class LocalMCPServer {
         }
 
         guard let meta = params["_meta"] as? [String: Any] else {
-            return jsonRPCError(
-                id: id,
-                code: -32602,
-                message: "Missing required params._meta",
-                status: 400
-            )
+            return jsonRPCError(id: id, code: -32602, message: "Missing required params._meta", status: 400)
         }
         guard let bodyVersion = meta["io.modelcontextprotocol/protocolVersion"] as? String else {
-            return jsonRPCError(
-                id: id,
-                code: -32602,
-                message: "Missing required _meta.io.modelcontextprotocol/protocolVersion",
-                status: 400
-            )
+            return jsonRPCError(id: id, code: -32602, message: "Missing required _meta.io.modelcontextprotocol/protocolVersion", status: 400)
         }
         guard bodyVersion == mcpModernProtocolVersion else {
-            if bodyVersion == headerVersion {
-                return unsupportedProtocolVersion(id: id, requested: bodyVersion)
-            }
+            if bodyVersion == headerVersion { return unsupportedProtocolVersion(id: id, requested: bodyVersion) }
             return headerMismatch(
                 id: id,
                 message: "MCP-Protocol-Version header '\(headerVersion)' does not match body protocol version '\(bodyVersion)'"
             )
         }
         guard meta["io.modelcontextprotocol/clientCapabilities"] is [String: Any] else {
-            return jsonRPCError(
-                id: id,
-                code: -32602,
-                message: "Missing required _meta.io.modelcontextprotocol/clientCapabilities",
-                status: 400
-            )
+            return jsonRPCError(id: id, code: -32602, message: "Missing required _meta.io.modelcontextprotocol/clientCapabilities", status: 400)
         }
         if let clientInfo = meta["io.modelcontextprotocol/clientInfo"] {
             guard let implementation = clientInfo as? [String: Any],
                   implementation["name"] is String,
                   implementation["version"] is String else {
-                return jsonRPCError(
-                    id: id,
-                    code: -32602,
-                    message: "Invalid _meta.io.modelcontextprotocol/clientInfo",
-                    status: 400
-                )
+                return jsonRPCError(id: id, code: -32602, message: "Invalid _meta.io.modelcontextprotocol/clientInfo", status: 400)
             }
         }
 
@@ -2074,9 +2072,7 @@ final class LocalMCPServer {
             let hostStart = trimmed.index(after: trimmed.startIndex)
             let host = String(trimmed[hostStart..<closingBracket])
             let remainder = String(trimmed[trimmed.index(after: closingBracket)...])
-            guard remainder.isEmpty || (remainder.hasPrefix(":") && isValidHTTPPort(remainder.dropFirst())) else {
-                return false
-            }
+            guard remainder.isEmpty || (remainder.hasPrefix(":") && isValidHTTPPort(remainder.dropFirst())) else { return false }
             return host == "::1"
         }
 
@@ -2131,9 +2127,7 @@ final class LocalMCPServer {
 
         guard value.unicodeScalars.allSatisfy({ scalar in
             scalar.value == 9 || (scalar.value >= 32 && scalar.value <= 126)
-        }) else {
-            return nil
-        }
+        }) else { return nil }
         return value
     }
 
@@ -2146,10 +2140,7 @@ final class LocalMCPServer {
             id: id,
             code: -32022,
             message: "Unsupported protocol version: \(requested)",
-            data: [
-                "supported": mcpAllSupportedVersions,
-                "requested": requested,
-            ],
+            data: ["supported": mcpAllSupportedVersions, "requested": requested],
             status: 400
         )
     }
@@ -2204,5 +2195,232 @@ final class LocalMCPServer {
         connection.send(content: data, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+}
+
+struct CodexSkillToolOutput {
+    let content: [[String: Any]]
+    let structuredContent: [String: Any]
+}
+
+private struct CodexSkillInfo {
+    let name: String
+    let description: String
+    let skillFile: String
+}
+
+private enum CodexSkillError: LocalizedError {
+    case invalid(String)
+    var errorDescription: String? { switch self { case let .invalid(message): return message } }
+}
+
+final class CodexSkillRegistry {
+    static let maxSkillBytes = 256 * 1024
+    private let root: URL
+    private let rootPath: String
+    private let log: (String) -> Void
+    private let lock = NSLock()
+    private var skills: [CodexSkillInfo] = []
+
+    init(rootPath: String, log: @escaping (String) -> Void) throws {
+        let expanded = NSString(string: rootPath).expandingTildeInPath
+        let url = URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        root = url.resolvingSymlinksInPath().standardizedFileURL
+        self.rootPath = root.path
+        self.log = log
+    }
+
+    var toolDefinitions: [[String: Any]] {
+        [
+            [
+                "name": "list_codex_skills",
+                "description": "List Codex project skills discovered under .agents/skills in the current shared workspace. If the user's message starts with '/<skill-name>', use this list when needed to resolve the requested skill before answering.",
+                "inputSchema": ["type": "object", "properties": [:], "required": [], "additionalProperties": false],
+                "outputSchema": ["type": "object", "additionalProperties": true],
+                "annotations": ["readOnlyHint": true, "destructiveHint": false, "openWorldHint": false],
+            ],
+            [
+                "name": "load_codex_skill",
+                "description": "Load a Codex Agent Skill from .agents/skills/<name>/SKILL.md in the current shared workspace. IMPORTANT: when the user's message starts with '/<skill-name>', call this tool with <skill-name> before answering, then follow the returned SKILL.md instructions for the current task. The name is a skill identifier, not a path.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": ["name": ["type": "string", "description": "Exact skill directory name under .agents/skills, for example speckit-analyze."]],
+                    "required": ["name"],
+                    "additionalProperties": false,
+                ],
+                "outputSchema": ["type": "object", "additionalProperties": true],
+                "annotations": ["readOnlyHint": true, "destructiveHint": false, "openWorldHint": false],
+            ],
+        ]
+    }
+
+    func hasTool(named name: String) -> Bool { name == "list_codex_skills" || name == "load_codex_skill" }
+
+    @discardableResult
+    func refresh() -> Int {
+        log("[Skills] Scanning .agents/skills...\n")
+        var found: [CodexSkillInfo] = []
+        let fileManager = FileManager.default
+        let skillsRoot: URL
+        do { skillsRoot = try resolve(".agents/skills") }
+        catch {
+            setSkills([])
+            log("[Skills] Scan failed: \(error.localizedDescription)\n")
+            return 0
+        }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: skillsRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            setSkills([])
+            log("[Skills] No Codex skills found in .agents/skills.\n")
+            return 0
+        }
+        let directories: [URL]
+        do {
+            directories = try fileManager.contentsOfDirectory(
+                at: skillsRoot,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ).sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        } catch {
+            setSkills([])
+            log("[Skills] Scan failed: \(error.localizedDescription)\n")
+            return 0
+        }
+        for directory in directories {
+            let name = directory.lastPathComponent
+            guard Self.validSkillName(name) else {
+                log("[Skills] Ignoring invalid skill directory name: \(name)\n")
+                continue
+            }
+            do {
+                let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                guard values.isDirectory == true, values.isSymbolicLink != true, contains(directory) else {
+                    log("[Skills] Refused unsafe skill directory: \(name)\n")
+                    continue
+                }
+                let relative = ".agents/skills/\(name)/SKILL.md"
+                let skillURL = try resolve(relative)
+                let skillValues = try skillURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+                guard skillValues.isRegularFile == true, skillValues.isSymbolicLink != true else { continue }
+                let size = skillValues.fileSize ?? 0
+                guard size <= Self.maxSkillBytes else {
+                    log("[Skills] Ignoring oversized SKILL.md: \(name) (\(size) bytes)\n")
+                    continue
+                }
+                let text = try Self.readUTF8(skillURL)
+                let metadata = Self.parseFrontmatter(text)
+                if let frontmatterName = metadata.name, frontmatterName != name {
+                    log("[Skills] Ignoring \(name): frontmatter name '\(frontmatterName)' does not match directory name.\n")
+                    continue
+                }
+                found.append(CodexSkillInfo(name: name, description: metadata.description ?? "", skillFile: relative))
+                log("[Skills] Found: \(name)\n")
+            } catch {
+                log("[Skills] Invalid SKILL.md for \(name): \(error.localizedDescription)\n")
+            }
+        }
+        setSkills(found)
+        log("[Skills] Loaded \(found.count) Codex skill\(found.count == 1 ? "" : "s").\n")
+        return found.count
+    }
+
+    func call(name: String, arguments: [String: Any]) throws -> CodexSkillToolOutput {
+        switch name {
+        case "list_codex_skills":
+            guard arguments.isEmpty else { throw CodexSkillError.invalid("Unexpected argument") }
+            return objectOutput(listSkills())
+        case "load_codex_skill":
+            guard arguments.count == 1, let skillName = arguments["name"] as? String else { throw CodexSkillError.invalid("Missing or invalid argument: name") }
+            return objectOutput(try loadSkill(skillName))
+        default:
+            throw CodexSkillError.invalid("Unknown skill tool: \(name)")
+        }
+    }
+
+    private func listSkills() -> [String: Any] {
+        let snapshot = getSkills()
+        return ["skills": snapshot.map { ["name": $0.name, "description": $0.description, "skill_file": $0.skillFile] }, "count": snapshot.count]
+    }
+
+    private func loadSkill(_ name: String) throws -> [String: Any] {
+        guard Self.validSkillName(name) else { throw CodexSkillError.invalid("Invalid Codex skill name") }
+        var skill = getSkills().first { $0.name == name }
+        if skill == nil {
+            refresh()
+            skill = getSkills().first { $0.name == name }
+        }
+        guard let skill else { throw CodexSkillError.invalid("Codex skill not found: \(name)") }
+        let skillURL = try resolve(skill.skillFile)
+        let values = try skillURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw CodexSkillError.invalid("Codex skill not found: \(name)") }
+        guard (values.fileSize ?? 0) <= Self.maxSkillBytes else { throw CodexSkillError.invalid("SKILL.md is larger than the 256 KB skill limit") }
+        let instructions = try Self.readUTF8(skillURL)
+        log("[Skills] Loading skill: \(name)\n")
+        log("[Skills] Loaded: \(skill.skillFile)\n")
+        return [
+            "name": skill.name,
+            "description": skill.description,
+            "skill_directory": ".agents/skills/\(skill.name)",
+            "skill_file": skill.skillFile,
+            "instructions": instructions,
+        ]
+    }
+
+    private func objectOutput(_ value: [String: Any]) -> CodexSkillToolOutput {
+        let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+        let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return CodexSkillToolOutput(content: [["type": "text", "text": text]], structuredContent: value)
+    }
+
+    private func resolve(_ relativePath: String) throws -> URL {
+        let candidate = root.appendingPathComponent(relativePath).standardizedFileURL
+        let canonical = canonicalizeExistingAncestor(of: candidate)
+        guard containsCanonicalPath(canonical.path) else { throw CodexSkillError.invalid("Refused: path is outside the shared directory") }
+        return canonical
+    }
+    private func contains(_ url: URL) -> Bool { containsCanonicalPath(canonicalizeExistingAncestor(of: url.standardizedFileURL).path) }
+    private func containsCanonicalPath(_ path: String) -> Bool { path == rootPath || path.hasPrefix(rootPath + "/") }
+    private func canonicalizeExistingAncestor(of url: URL) -> URL {
+        var ancestor = url
+        var suffix: [String] = []
+        while !FileManager.default.fileExists(atPath: ancestor.path) {
+            let parent = ancestor.deletingLastPathComponent()
+            if parent.path == ancestor.path { break }
+            suffix.insert(ancestor.lastPathComponent, at: 0)
+            ancestor = parent
+        }
+        var resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL
+        for component in suffix { resolved.appendPathComponent(component) }
+        return resolved.standardizedFileURL
+    }
+    private func setSkills(_ value: [CodexSkillInfo]) { lock.lock(); skills = value; lock.unlock() }
+    private func getSkills() -> [CodexSkillInfo] { lock.lock(); defer { lock.unlock() }; return skills }
+
+    private static func validSkillName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.count <= 128 else { return false }
+        guard let first = name.unicodeScalars.first, CharacterSet.alphanumerics.contains(first) else { return false }
+        return name.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || ".-_".unicodeScalars.contains($0) }
+    }
+    private static func readUTF8(_ url: URL) throws -> String {
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        guard data.count <= maxSkillBytes else { throw CodexSkillError.invalid("SKILL.md is larger than the 256 KB skill limit") }
+        guard let text = String(data: data, encoding: .utf8) else { throw CodexSkillError.invalid("SKILL.md must be valid UTF-8") }
+        return text
+    }
+    private static func parseFrontmatter(_ text: String) -> (name: String?, description: String?) {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        guard normalized.hasPrefix("---\n"), let range = normalized.range(of: "\n---\n", range: normalized.index(normalized.startIndex, offsetBy: 4)..<normalized.endIndex) else { return (nil, nil) }
+        let body = normalized[normalized.index(normalized.startIndex, offsetBy: 4)..<range.lowerBound]
+        var name: String?; var description: String?
+        for raw in body.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard let colon = raw.firstIndex(of: ":") else { continue }
+            let key = raw[..<colon].trimmingCharacters(in: .whitespaces)
+            var value = raw[raw.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            if value.count >= 2, (value.hasPrefix("\"") && value.hasSuffix("\"") || value.hasPrefix("'") && value.hasSuffix("'")) { value = String(value.dropFirst().dropLast()) }
+            if key == "name" { name = value }
+            else if key == "description" { description = value }
+        }
+        return (name, description)
     }
 }

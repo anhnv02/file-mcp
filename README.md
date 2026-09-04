@@ -408,3 +408,27 @@ Platform release builds are intentionally separate because signing/notarization 
 FileMCP source code is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE).
 
 The vendored OpenAI `tunnel-client` is distributed under its upstream license in [`vendor/tunnel-client/LICENSE`](vendor/tunnel-client/LICENSE). Its upstream `NOTICE` and platform third-party license evidence are preserved beside bundled binaries and copied into distributable app packages.
+
+
+## Codex project skills
+
+FileMCP can expose Codex Agent Skills stored inside the active shared workspace using the standard project layout:
+
+```text
+<shared-directory>/.agents/skills/<skill-name>/SKILL.md
+```
+
+Two read-only MCP tools are always exposed:
+
+| Tool | Purpose |
+| --- | --- |
+| `list_codex_skills` | List valid project skills discovered under `.agents/skills`. |
+| `load_codex_skill` | Load one skill's complete `SKILL.md` instructions by exact directory name. |
+
+FileMCP scans `.agents/skills` automatically whenever the local MCP server starts. If a requested skill was added after startup, `load_codex_skill` refreshes the registry once before reporting that the skill is missing.
+
+The MCP tool and server descriptions define `/name` as a skill-routing convention. For example, when FileMCP is available to the ChatGPT message, entering `/speckit-analyze` is intended to cause the model to call `load_codex_skill(name="speckit-analyze")` before answering and then follow the returned `SKILL.md`. This is not registration of a native ChatGPT slash-menu command or autocomplete entry.
+
+Skill loading is read-only and remains inside the configured shared directory. Skill names cannot contain path separators or traversal syntax, symlink/reparse-point escapes are refused, `SKILL.md` must be valid UTF-8, and a skill larger than 256 KB is rejected instead of being silently truncated. If the optional frontmatter `name` is present, it must exactly match the skill directory name.
+
+Skill discovery and loading are written to the FileMCP Logs view with a `[Skills]` prefix. The contents of `SKILL.md` are not copied into the application log.
