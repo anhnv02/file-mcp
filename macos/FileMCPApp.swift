@@ -114,12 +114,16 @@ private final class RuntimeStorage {
     private let keychainAccount = "runtime-api-key"
 
     var hasSavedAPIKey: Bool {
-        if let value = try? readKeychainAPIKey(), !value.isEmpty { return true }
+        if let value = try? readKeychainAPIKey(), !value.isEmpty {
+            return true
+        }
         return legacyAPIKey != nil
     }
 
     func readAPIKey() throws -> String {
-        if let value = try readKeychainAPIKey(), !value.isEmpty { return value }
+        if let value = try readKeychainAPIKey(), !value.isEmpty {
+            return value
+        }
         if let legacy = legacyAPIKey {
             try saveAPIKey(legacy)
             return legacy
@@ -132,29 +136,40 @@ private final class RuntimeStorage {
         guard let data = value.data(using: .utf8) else {
             throw NSError(domain: appName, code: 2, userInfo: [NSLocalizedDescriptionKey: "The API key is not valid UTF-8."])
         }
+
         let query = keychainQuery()
-        let attributes: [CFString: Any] = [kSecValueData: data, kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        let attributes: [CFString: Any] = [
+            kSecValueData: data,
+            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecItemNotFound {
             var item = query
             item[kSecValueData] = data
             item[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             let addStatus = SecItemAdd(item as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw keychainError(operation: "save the API key", status: addStatus) }
+            guard addStatus == errSecSuccess else {
+                throw keychainError(operation: "save the API key", status: addStatus)
+            }
         } else if updateStatus != errSecSuccess {
             throw keychainError(operation: "update the API key", status: updateStatus)
         }
+
         UserDefaults.standard.removeObject(forKey: ConfigKey.apiKey)
     }
 
     func deleteAPIKey() throws {
         let status = SecItemDelete(keychainQuery() as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw keychainError(operation: "delete the API key", status: status) }
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw keychainError(operation: "delete the API key", status: status)
+        }
         UserDefaults.standard.removeObject(forKey: ConfigKey.apiKey)
     }
 
     private var legacyAPIKey: String? {
-        guard let value = UserDefaults.standard.string(forKey: ConfigKey.apiKey), !value.isEmpty else { return nil }
+        guard let value = UserDefaults.standard.string(forKey: ConfigKey.apiKey), !value.isEmpty else {
+            return nil
+        }
         return value
     }
 
@@ -162,10 +177,13 @@ private final class RuntimeStorage {
         var query = keychainQuery()
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
+
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw keychainError(operation: "read the API key", status: status) }
+        guard status == errSecSuccess else {
+            throw keychainError(operation: "read the API key", status: status)
+        }
         guard let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
             throw NSError(domain: appName, code: 3, userInfo: [NSLocalizedDescriptionKey: "The API key stored in Keychain is not valid UTF-8."])
         }
@@ -173,19 +191,27 @@ private final class RuntimeStorage {
     }
 
     private func keychainQuery() -> [CFString: Any] {
-        [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: keychainAccount]
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: keychainService,
+            kSecAttrAccount: keychainAccount,
+        ]
     }
 
     private func keychainError(operation: String, status: OSStatus) -> NSError {
         let detail = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
-        return NSError(domain: appName, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Could not \(operation) in macOS Keychain: \(detail)"])
+        return NSError(
+            domain: appName,
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "Could not \(operation) in macOS Keychain: \(detail)"]
+        )
     }
 }
 
 private final class MainViewController: NSViewController, NSTabViewDelegate {
     private let storage = RuntimeStorage()
     private let runtime = LocalMCPRuntime()
-    private var logBuffer = ""
+    private let logBuffer = NSMutableString()
     private var logFlushScheduled = false
     private let maxLogCharacters = 500_000
 
@@ -199,6 +225,8 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
     private let gitUserEmailField = NSTextField()
     private let enableCommandsCheckbox = NSButton(checkboxWithTitle: "Allow shell commands", target: nil, action: nil)
     private let logView = NSTextView()
+    private let connectionStatusLabel = NSTextField(labelWithString: "Disconnected")
+    private let followLogsCheckbox = NSButton(checkboxWithTitle: "Follow new logs", target: nil, action: nil)
     private let saveConnectionButton = LoadingButton(title: "Save connection", target: nil, action: nil)
     private let saveSettingsButton = LoadingButton(title: "Save settings", target: nil, action: nil)
     private let startButton = NSButton(title: "Connect", target: nil, action: nil)
@@ -209,7 +237,9 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
     private let apiKeyStatusLabel = NSTextField(labelWithString: "")
     private let tabs = NSTabView()
 
-    override func loadView() { view = NSView() }
+    override func loadView() {
+        view = NSView()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -218,7 +248,9 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
         configureRuntime()
     }
 
-    deinit { shutdownForTermination() }
+    deinit {
+        shutdownForTermination()
+    }
 
     private func buildUI() {
         configure(tunnelIDField, placeholder: "tunnel_...")
@@ -240,24 +272,18 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
 
         logView.isEditable = false
         logView.isSelectable = true
-        logView.isVerticallyResizable = true
-        logView.isHorizontallyResizable = true
-        logView.autoresizingMask = [.width, .height]
         logView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        logView.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1.0)
-        logView.textColor = NSColor.white
-        logView.insertionPointColor = NSColor.white
+        logView.backgroundColor = .textBackgroundColor
+        logView.textColor = .textColor
+        logView.insertionPointColor = .textColor
         logView.string = ""
+        logView.textContainerInset = NSSize(width: 8, height: 8)
+        logView.isAutomaticQuoteSubstitutionEnabled = false
+        logView.isAutomaticSpellingCorrectionEnabled = false
+        logView.setAccessibilityLabel("Runtime logs")
         let logScroll = NSScrollView()
         logScroll.hasVerticalScroller = true
-        logScroll.hasHorizontalScroller = true
-        logScroll.autohidesScrollers = true
         logScroll.borderType = .bezelBorder
-        logView.frame = logScroll.contentView.bounds
-        logView.minSize = NSSize(width: 0, height: logScroll.contentSize.height)
-        logView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        logView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        logView.textContainer?.widthTracksTextView = false
         logScroll.documentView = logView
 
         startButton.target = self
@@ -459,11 +485,25 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
         logScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         logScroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         let logPage = NSView()
+        followLogsCheckbox.state = .on
+        followLogsCheckbox.target = self
+        followLogsCheckbox.action = #selector(followLogsChanged)
+        followLogsCheckbox.toolTip = "Scroll to new output. Turn off to read earlier logs."
+        let clearLogsButton = NSButton(title: "Clear", target: self, action: #selector(clearLogs))
+        clearLogsButton.bezelStyle = .rounded
+        clearLogsButton.toolTip = "Clear displayed logs without stopping the connection"
+        let logToolbar = NSStackView(views: [followLogsCheckbox, NSView(), clearLogsButton])
+        logToolbar.orientation = .horizontal
+        logToolbar.translatesAutoresizingMaskIntoConstraints = false
+        logPage.addSubview(logToolbar)
         logPage.addSubview(logScroll)
         NSLayoutConstraint.activate([
             logScroll.leadingAnchor.constraint(equalTo: logPage.leadingAnchor, constant: 12),
             logScroll.trailingAnchor.constraint(equalTo: logPage.trailingAnchor, constant: -12),
-            logScroll.topAnchor.constraint(equalTo: logPage.topAnchor, constant: 12),
+            logToolbar.leadingAnchor.constraint(equalTo: logPage.leadingAnchor, constant: 12),
+            logToolbar.trailingAnchor.constraint(equalTo: logPage.trailingAnchor, constant: -12),
+            logToolbar.topAnchor.constraint(equalTo: logPage.topAnchor, constant: 8),
+            logScroll.topAnchor.constraint(equalTo: logToolbar.bottomAnchor, constant: 8),
             logScroll.bottomAnchor.constraint(equalTo: logPage.bottomAnchor, constant: -12),
         ])
 
@@ -491,7 +531,8 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
         footerDivider.boxType = .separator
         footerDivider.translatesAutoresizingMaskIntoConstraints = false
 
-        let quitHint = NSTextField(labelWithString: "Quit the app and stop the tunnel if it is running.")
+        let quitHint = connectionStatusLabel
+        quitHint.toolTip = "Closing the window keeps the tunnel running. Quit stops it."
         quitHint.font = .systemFont(ofSize: 10.5)
         quitHint.textColor = .secondaryLabelColor
         quitHint.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -515,6 +556,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
             tabs.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
             tabs.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
             tabs.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+
             footer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -525,6 +567,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
             quitRow.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 24),
             quitRow.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -24),
             quitRow.topAnchor.constraint(equalTo: footerDivider.bottomAnchor, constant: 9),
+
             saveSettingsButton.widthAnchor.constraint(equalToConstant: Layout.contentWidth),
             connectionRoot.widthAnchor.constraint(equalToConstant: Layout.contentWidth),
             settingsForm.widthAnchor.constraint(equalToConstant: Layout.contentWidth),
@@ -565,17 +608,23 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
 
     private func updateAPIKeyPlaceholder() {
         let hasSavedKey = storage.hasSavedAPIKey
-        apiKeyField.placeholderString = hasSavedKey ? "Saved — leave blank to keep it" : "sk-..."
-        apiKeyStatusLabel.stringValue = hasSavedKey ? "API key is saved in Keychain" : "No API key is saved"
+        apiKeyField.placeholderString = hasSavedKey
+            ? "Saved — leave blank to keep it"
+            : "sk-..."
+        apiKeyStatusLabel.stringValue = hasSavedKey
+            ? "API key is saved in Keychain"
+            : "No API key is saved"
         deleteKeyButton.isEnabled = hasSavedKey
     }
 
     private func defaultDirectory() -> String {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/FileMCP", isDirectory: true).path
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/FileMCP", isDirectory: true).path
     }
 
     private func saveConnectionConfiguration() {
-        UserDefaults.standard.set(tunnelIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: ConfigKey.tunnelID)
+        let defaults = UserDefaults.standard
+        defaults.set(tunnelIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: ConfigKey.tunnelID)
     }
 
     private func saveSettingsConfiguration() {
@@ -600,7 +649,9 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose directory"
-        if panel.runModal() == .OK, let url = panel.url { directoryField.stringValue = url.path }
+        if panel.runModal() == .OK, let url = panel.url {
+            directoryField.stringValue = url.path
+        }
     }
 
     @objc private func startTunnel() {
@@ -613,7 +664,11 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
         case .stopped, .failed:
             break
         }
-        guard validateConnectionConfiguration(requireAPIKey: true), validateSettingsConfiguration() else { return }
+
+        guard validateConnectionConfiguration(requireAPIKey: true), validateSettingsConfiguration() else {
+            return
+        }
+
         do {
             let typedKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !typedKey.isEmpty {
@@ -627,7 +682,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
                 showError("The MCP port is invalid.")
                 return
             }
-            appendLog("[Runtime] Connect requested.\n")
+
             runtime.start(LocalMCPConfiguration(
                 tunnelID: tunnelIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
                 apiKey: apiKey,
@@ -639,11 +694,16 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
                 gitUserEmail: gitUserEmailField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
                 enableCommands: enableCommandsCheckbox.state == .on
             ))
-        } catch { showError(error.localizedDescription) }
+        } catch {
+            showError(error.localizedDescription)
+        }
     }
 
     @objc private func saveConnectionOnly() {
-        guard validateConnectionConfiguration(requireAPIKey: true) else { return }
+        guard validateConnectionConfiguration(requireAPIKey: true) else {
+            return
+        }
+
         saveConnectionButton.setLoading(true)
         do {
             let typedKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -653,8 +713,10 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
                 updateAPIKeyPlaceholder()
             }
             saveConnectionConfiguration()
-            appendLog("[Runtime] Connection settings saved.\n")
-            if runtime.state != .stopped { appendLog("[Runtime] Changes will take effect the next time the tunnel starts.\n") }
+            appendLog("Connection settings saved.\n")
+            if runtime.state != .stopped {
+                appendLog("Changes will take effect the next time the tunnel starts.\n")
+            }
             finishLoading(saveConnectionButton)
         } catch {
             saveConnectionButton.setLoading(false)
@@ -663,24 +725,47 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
     }
 
     @objc private func saveSettingsOnly() {
-        guard validateSettingsConfiguration() else { return }
+        guard validateSettingsConfiguration() else {
+            return
+        }
+
         saveSettingsButton.setLoading(true)
         saveSettingsConfiguration()
-        appendLog("[Runtime] Settings saved.\n")
-        if runtime.state != .stopped { appendLog("[Runtime] Changes will take effect the next time the tunnel starts.\n") }
+        appendLog("Settings saved.\n")
+        if runtime.state != .stopped {
+            appendLog("Changes will take effect the next time the tunnel starts.\n")
+        }
         finishLoading(saveSettingsButton)
     }
 
     private func finishLoading(_ button: LoadingButton) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak button] in button?.setLoading(false) }
+        let originalTitle = button.title
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak button] in
+            button?.setLoading(false)
+            button?.title = "Saved"
+            button?.isEnabled = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak button] in
+                button?.title = originalTitle
+                button?.isEnabled = true
+            }
+        }
     }
 
     private func validateConnectionConfiguration(requireAPIKey: Bool) -> Bool {
         let tunnelID = tunnelIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let typedKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !tunnelID.isEmpty else { showError("Enter a Tunnel ID in the Connection tab."); return false }
-        guard LocalMCPRuntime.isValidTunnelID(tunnelID) else { showError("Tunnel ID must match tunnel_<32 lowercase letters or digits>."); return false }
-        if requireAPIKey && typedKey.isEmpty && !storage.hasSavedAPIKey { showError("Enter a Runtime API key in the Connection tab."); return false }
+        guard !tunnelID.isEmpty else {
+            showError("Enter a Tunnel ID in the Connection tab.")
+            return false
+        }
+        guard LocalMCPRuntime.isValidTunnelID(tunnelID) else {
+            showError("Tunnel ID must match tunnel_<32 lowercase letters or digits>.")
+            return false
+        }
+        if requireAPIKey && typedKey.isEmpty && !storage.hasSavedAPIKey {
+            showError("Enter a Runtime API key in the Connection tab.")
+            return false
+        }
         return true
     }
 
@@ -688,28 +773,65 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
         let profile = profileField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let port = portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let directory = directoryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !directory.isEmpty else { tabs.selectTabViewItem(withIdentifier: "settings"); showError("Choose a shared directory."); return false }
-        guard !profile.isEmpty else { tabs.selectTabViewItem(withIdentifier: "settings"); setAdvancedSettingsExpanded(true); showError("Profile cannot be empty."); return false }
-        guard LocalMCPRuntime.isValidProfileName(profile) else { tabs.selectTabViewItem(withIdentifier: "settings"); setAdvancedSettingsExpanded(true); showError("Profile must start with a letter or number and contain only letters, numbers, '.', '_' or '-' (maximum 128 characters)."); return false }
-        guard let portNumber = UInt16(port), portNumber > 0 else { tabs.selectTabViewItem(withIdentifier: "settings"); setAdvancedSettingsExpanded(true); showError("MCP port must be between 1 and 65535."); return false }
+
+        guard !directory.isEmpty else {
+            tabs.selectTabViewItem(withIdentifier: "settings")
+            showError("Choose a shared directory.")
+            return false
+        }
+        guard !profile.isEmpty else {
+            tabs.selectTabViewItem(withIdentifier: "settings")
+            setAdvancedSettingsExpanded(true)
+            showError("Profile cannot be empty.")
+            return false
+        }
+        guard LocalMCPRuntime.isValidProfileName(profile) else {
+            tabs.selectTabViewItem(withIdentifier: "settings")
+            setAdvancedSettingsExpanded(true)
+            showError("Profile must start with a letter or number and contain only letters, numbers, '.', '_' or '-' (maximum 128 characters).")
+            return false
+        }
+        guard let portNumber = UInt16(port), portNumber > 0 else {
+            tabs.selectTabViewItem(withIdentifier: "settings")
+            setAdvancedSettingsExpanded(true)
+            showError("MCP port must be between 1 and 65535.")
+            return false
+        }
         let healthAddress = healthAddressField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard LocalMCPRuntime.normalizedHealthAddress(healthAddress) != nil else { tabs.selectTabViewItem(withIdentifier: "settings"); setAdvancedSettingsExpanded(true); showError("Health listener must use localhost, 127.0.0.1, or [::1] with a port from 0 to 65535."); return false }
+        guard LocalMCPRuntime.normalizedHealthAddress(healthAddress) != nil else {
+            tabs.selectTabViewItem(withIdentifier: "settings")
+            setAdvancedSettingsExpanded(true)
+            showError("Health listener must use localhost, 127.0.0.1, or [::1] with a port from 0 to 65535.")
+            return false
+        }
         return true
     }
 
-    func showSettingsTab() { tabs.selectTabViewItem(withIdentifier: "settings") }
-    func shutdownForTermination() { runtime.shutdownImmediately() }
+    func showSettingsTab() {
+        tabs.selectTabViewItem(withIdentifier: "settings")
+    }
+
+    func shutdownForTermination() {
+        runtime.shutdownImmediately()
+    }
 
     @objc private func deleteSavedKey() {
         do {
             try storage.deleteAPIKey()
             apiKeyField.stringValue = ""
             updateAPIKeyPlaceholder()
-        } catch { showError(error.localizedDescription) }
+        } catch {
+            showError(error.localizedDescription)
+        }
     }
 
-    @objc private func quitApp() { NSApp.terminate(nil) }
-    @objc private func toggleAdvancedSettings() { setAdvancedSettingsExpanded(advancedSettingsGroup.isHidden) }
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
+    @objc private func toggleAdvancedSettings() {
+        setAdvancedSettingsExpanded(advancedSettingsGroup.isHidden)
+    }
 
     private func setAdvancedSettingsExpanded(_ expanded: Bool) {
         advancedSettingsGroup.isHidden = !expanded
@@ -721,14 +843,15 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         let settingsSelected = tabViewItem?.identifier as? String == "settings"
         resizeWindowForAdvancedSettings(expanded: settingsSelected && !advancedSettingsGroup.isHidden)
-        if tabViewItem?.identifier as? String == "log" { flushLogBuffer() }
     }
 
     private func resizeWindowForAdvancedSettings(expanded: Bool) {
         guard let window = view.window else { return }
+
         let targetContentHeight = expanded ? Layout.expandedWindowHeight : Layout.collapsedWindowHeight
         var contentRect = window.contentRect(forFrameRect: window.frame)
         guard abs(contentRect.height - targetContentHeight) > 0.5 else { return }
+
         let topEdge = window.frame.maxY
         contentRect.size.height = targetContentHeight
         var targetFrame = window.frameRect(forContentRect: contentRect)
@@ -738,17 +861,22 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
     }
 
     private func advancedChevron(expanded: Bool) -> NSImage? {
-        NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: expanded ? "Collapse advanced options" : "Expand advanced options")
+        NSImage(
+            systemSymbolName: expanded ? "chevron.down" : "chevron.right",
+            accessibilityDescription: expanded ? "Collapse advanced options" : "Expand advanced options"
+        )
     }
 
     private func configureRuntime() {
         runtime.onLog = { [weak self] text in
-            DispatchQueue.main.async { self?.appendLog(text) }
+            DispatchQueue.main.async {
+                self?.appendLog(text)
+            }
         }
         runtime.onStateChange = { [weak self] state in
-            DispatchQueue.main.async {
-                self?.updateRunButton(state: state)
-                if case let .failed(message) = state { self?.showError(message) }
+            self?.updateRunButton(state: state)
+            if case let .failed(message) = state {
+                self?.showError(message)
             }
         }
     }
@@ -756,36 +884,86 @@ private final class MainViewController: NSViewController, NSTabViewDelegate {
     private func updateRunButton(state: LocalMCPRuntimeState) {
         switch state {
         case .stopped, .failed:
-            startButton.title = "Connect"; startButton.bezelColor = .controlAccentColor; startButton.isEnabled = true
+            startButton.title = "Connect"
+            startButton.bezelColor = .controlAccentColor
+            startButton.isEnabled = true
         case .starting:
-            startButton.title = "Connecting…"; startButton.bezelColor = .controlAccentColor; startButton.isEnabled = false
+            startButton.title = "Connecting…"
+            startButton.bezelColor = .controlAccentColor
+            startButton.isEnabled = false
         case .running:
-            startButton.title = "Disconnect"; startButton.bezelColor = .systemRed; startButton.isEnabled = true
+            startButton.title = "Disconnect"
+            startButton.bezelColor = .systemRed
+            startButton.isEnabled = true
         case .stopping:
-            startButton.title = "Disconnecting…"; startButton.bezelColor = .systemRed; startButton.isEnabled = false
+            startButton.title = "Disconnecting…"
+            startButton.bezelColor = .systemRed
+            startButton.isEnabled = false
+        }
+        switch state {
+        case .stopped:
+            connectionStatusLabel.stringValue = "Disconnected"
+            connectionStatusLabel.textColor = .secondaryLabelColor
+        case .starting:
+            connectionStatusLabel.stringValue = "Connecting…"
+            connectionStatusLabel.textColor = .secondaryLabelColor
+        case .running:
+            connectionStatusLabel.stringValue = "Connected · Workspace shared"
+            connectionStatusLabel.textColor = .systemGreen
+        case .stopping:
+            connectionStatusLabel.stringValue = "Disconnecting…"
+            connectionStatusLabel.textColor = .secondaryLabelColor
+        case .failed:
+            connectionStatusLabel.stringValue = "Connection failed · Retry with Connect"
+            connectionStatusLabel.textColor = .systemRed
         }
         startButton.contentTintColor = .white
     }
 
+    // Bound pending output separately from the displayed text. Only new output is
+    // appended during normal updates, avoiding a full text layout every 150 ms.
     private func appendLog(_ text: String) {
-        logBuffer += text
-        if logBuffer.count > maxLogCharacters {
-            let overflow = logBuffer.count - maxLogCharacters
-            let cut = logBuffer.index(logBuffer.startIndex, offsetBy: overflow)
-            logBuffer = "[...older log truncated...]\n" + String(logBuffer[cut...])
-        }
+        logBuffer.append(text)
+        trimLog(logBuffer)
         guard !logFlushScheduled else { return }
         logFlushScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.flushLogBuffer() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.flushLogBuffer()
+        }
+    }
+
+    private func trimLog(_ text: NSMutableString) {
+        guard text.length > maxLogCharacters else { return }
+        let marker = "[...older log truncated...]\n"
+        let overflow = text.length - maxLogCharacters + (marker as NSString).length
+        let range = text.rangeOfComposedCharacterSequences(for: NSRange(location: 0, length: overflow))
+        text.replaceCharacters(in: range, with: marker)
     }
 
     private func flushLogBuffer() {
         logFlushScheduled = false
-        logView.string = logBuffer
-        logView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        logView.textColor = .white
-        logView.scrollToEndOfDocument(nil)
-        logView.needsDisplay = true
+        guard logBuffer.length > 0, let storage = logView.textStorage else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.textColor,
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+        ]
+        storage.beginEditing()
+        storage.append(NSAttributedString(string: logBuffer as String, attributes: attributes))
+        trimLog(storage.mutableString)
+        storage.endEditing()
+        logBuffer.setString("")
+        if followLogsCheckbox.state == .on {
+            logView.scrollToEndOfDocument(nil)
+        }
+    }
+
+    @objc private func followLogsChanged() {
+        if followLogsCheckbox.state == .on { logView.scrollToEndOfDocument(nil) }
+    }
+
+    @objc private func clearLogs() {
+        logBuffer.setString("")
+        logView.string = ""
     }
 
     private func showError(_ message: String) {
@@ -804,6 +982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let controller = MainViewController()
         self.controller = controller
+
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Layout.windowWidth, height: Layout.collapsedWindowHeight),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -816,6 +995,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         window.center()
         self.window = window
+
         configureMainMenu()
         showMainWindow()
     }
@@ -833,32 +1013,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureMainMenu() {
         let mainMenu = NSMenu()
+
         let appMenuItem = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
         let appMenu = NSMenu(title: appName)
-        let aboutItem = NSMenuItem(title: "About FileMCP", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let aboutItem = NSMenuItem(
+            title: "About FileMCP",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
         aboutItem.target = NSApp
         appMenu.addItem(aboutItem)
+
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettingsWindow), keyEquivalent: ",")
         settingsItem.target = self
         appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
+
         let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
         let servicesMenu = NSMenu(title: "Services")
         servicesItem.submenu = servicesMenu
         NSApp.servicesMenu = servicesMenu
         appMenu.addItem(servicesItem)
         appMenu.addItem(.separator())
+
         let hideItem = NSMenuItem(title: "Hide FileMCP", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         hideItem.target = NSApp
         appMenu.addItem(hideItem)
-        let hideOthersItem = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+
+        let hideOthersItem = NSMenuItem(
+            title: "Hide Others",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
         hideOthersItem.target = NSApp
         hideOthersItem.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(hideOthersItem)
+
         let showAllItem = NSMenuItem(title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         showAllItem.target = NSApp
         appMenu.addItem(showAllItem)
         appMenu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "Quit FileMCP", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApp
         appMenu.addItem(quitItem)
@@ -895,11 +1090,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
         NSApp.windowsMenu = windowMenu
+
         NSApp.mainMenu = mainMenu
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showMainWindow() }
+        if !flag {
+            showMainWindow()
+        }
         return true
     }
 

@@ -6,7 +6,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace FileMCP.Core;
 
-public sealed record ProcessResult(int ExitCode, string Stdout, string Stderr, bool TimedOut);
+public sealed record ProcessResult(int ExitCode, string Stdout, string Stderr, bool TimedOut, bool StdoutTruncated = false, bool StderrTruncated = false);
 
 internal sealed class BoundedTextBuffer
 {
@@ -17,6 +17,17 @@ internal sealed class BoundedTextBuffer
     private long _omittedBytes;
 
     public BoundedTextBuffer(int limitBytes) => _limitBytes = Math.Max(1, limitBytes);
+
+    public bool Truncated
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _omittedBytes > 0;
+            }
+        }
+    }
 
     public void Append(ReadOnlySpan<char> chars)
     {
@@ -90,10 +101,11 @@ public static class ProcessRunner
         IReadOnlyDictionary<string, string>? environment = null,
         int timeoutSeconds = DefaultCommandTimeoutSeconds,
         int outputLimitBytes = DefaultOutputLimitBytes,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool utf8Output = false)
     {
         ValidateProcessStrings(executable, arguments, cwd, environment);
-        var process = StartProcess(executable, arguments, cwd, environment);
+        var process = StartProcess(executable, arguments, cwd, environment, utf8Output);
         using var job = WindowsJob.CreateAndAssign(process);
         var stdout = new BoundedTextBuffer(outputLimitBytes);
         var stderr = new BoundedTextBuffer(outputLimitBytes);
@@ -142,7 +154,9 @@ public static class ProcessRunner
             process.HasExited ? process.ExitCode : -1,
             stdout.ToString(),
             stderr.ToString(),
-            timedOut);
+            timedOut,
+            stdout.Truncated,
+            stderr.Truncated);
     }
 
     public static ManagedProcess StartManaged(
@@ -154,7 +168,7 @@ public static class ProcessRunner
         Action<int> onExit)
     {
         ValidateProcessStrings(executable, arguments, cwd, environment);
-        var process = StartProcess(executable, arguments, cwd, environment);
+        var process = StartProcess(executable, arguments, cwd, environment, utf8Output: false);
         return new ManagedProcess(process, WindowsJob.CreateAndAssign(process), onOutput, onExit);
     }
 
@@ -179,7 +193,8 @@ public static class ProcessRunner
         string executable,
         IReadOnlyList<string> arguments,
         string? cwd,
-        IReadOnlyDictionary<string, string>? environment)
+        IReadOnlyDictionary<string, string>? environment,
+        bool utf8Output)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -191,6 +206,11 @@ public static class ProcessRunner
             CreateNoWindow = true,
             WorkingDirectory = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : cwd,
         };
+        if (utf8Output)
+        {
+            startInfo.StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            startInfo.StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        }
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);

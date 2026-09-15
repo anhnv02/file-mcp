@@ -68,6 +68,17 @@ When updating `vendor/tunnel-client`:
 5. keep the upstream `LICENSE`, `NOTICE`, and platform third-party license evidence with each binary;
 6. run the relevant macOS and Windows test/build jobs.
 
+## Vendored ripgrep updates
+
+When updating `vendor/ripgrep`:
+
+1. use an official `BurntSushi/ripgrep` GitHub release;
+2. verify every bundled platform archive against the `.sha256` file published with the same release;
+3. verify each extracted binary by SHA-256 and update the pinned checksums in `.github/workflows/verify.yml`;
+4. update `vendor/ripgrep/VERSION` and `vendor/ripgrep/README.md`;
+5. keep `COPYING`, `LICENSE-MIT`, and `UNLICENSE` from the release archive;
+6. run the relevant macOS and Windows test/build jobs, including the search integration tests.
+
 ## Pull requests
 
 Describe the behavior changed, security impact, affected platforms, and exact verification commands/results. Keep unrelated refactors out of security-sensitive patches so review remains auditable.

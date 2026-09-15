@@ -20,7 +20,7 @@ FileMCP is an independent open-source project. It is not an official OpenAI prod
 - Native desktop implementations:
   - **Swift + AppKit** on macOS.
   - **C# + .NET 8 + WPF** on Windows.
-- Equivalent MCP surface on both platforms: the same filesystem, Git, protocol, tunnel, and optional command-execution behavior.
+- Equivalent core MCP surface on both platforms: the same filesystem, Git, Codex-history import, protocol, tunnel, and optional command-execution behavior.
 - Local MCP server listens on **loopback only** (`127.0.0.1`).
 - Built-in filesystem tools are restricted to one configured workspace root; optional shell commands are not OS-sandboxed.
 - Symlink/reparse-point and canonical-path checks protect the workspace boundary.
@@ -41,7 +41,7 @@ FileMCP is an independent open-source project. It is not an official OpenAI prod
 | Windows x64 | .NET 8 / WPF | `windows-amd64` | Windows PowerShell |
 | Windows ARM64 | .NET 8 / WPF | `windows-arm64` | Windows PowerShell |
 
-The macOS build scripts understand Intel (`darwin-amd64`), but that platform is not currently bundled in this repository. Add the matching official `tunnel-client` binary and license sidecar before building for Intel macOS.
+The macOS build scripts understand Intel (`darwin-amd64`), but that platform is not currently bundled in this repository. Add the matching official `tunnel-client` binary and license sidecar plus the matching official ripgrep binary before building for Intel macOS.
 
 ## Requirements
 
@@ -160,11 +160,22 @@ Use **Quit FileMCP** (or the platform quit shortcut) to terminate the app and st
 | `list_files` | List entries in a directory. |
 | `read_file` | Read a text file. |
 | `read_file_range` | Read a targeted line range with range metadata. |
-| `search_filenames` | Search filenames recursively. |
-| `search_content` | Search text content and return bounded previews. |
+| `grep` | ripgrep-backed regex or literal content search with glob/type filters, `files_with_matches`/`content`/`count` output modes, context lines, and `head_limit`/`offset` pagination. |
+| `glob` | ripgrep-backed file path search with gitignore-style globs, newest-modified first, with pagination. |
+| `search_code` | Rank up to six literal code queries so declarations/whole identifiers surface ahead of incidental usages; ripgrep selects candidate files, then every matching line is ranked. |
+| `repo_overview` | Return factual top-level structure, detected manifests, extension counts, exclusions, and coverage metadata. |
+| `batch_read` | Combine up to 16 read-only file/search/Git inspections into one MCP round trip. |
 | `write_file` | Create, replace, or append to a text file. |
 | `delete_file` | Delete a file or a file-like link/reparse entry. |
 | `delete_directory` | Recursively delete a real directory within the workspace. |
+
+### Coding workflow
+
+| Tool | Purpose |
+| --- | --- |
+| `workspace_context` | Start a coding task with the scoped working directory, Git status, applicable `AGENTS.md` files, bounded manifest contents, and top-level entries. |
+| `edit_file` | Replace one exact, unique text occurrence in an existing UTF-8 file, with optional SHA-256 conflict protection and dry-run preview. |
+| `apply_patch` | Apply 1–64 ordered exact-text changes across existing UTF-8 files as one conflict-checked batch, capped at 32 MB of aggregate source files. It validates the full batch before writing, supports original-file SHA-256 guards and dry-run previews, and rolls back already-written files best-effort if a later write fails. |
 
 ### Git
 
@@ -178,13 +189,21 @@ Use **Quit FileMCP** (or the platform quit shortcut) to terminate the app and st
 | `git_commit` | Create a commit. |
 | `git_push` | Push the current branch to its configured upstream. |
 
+### Codex history
+
+| Tool | Purpose |
+| --- | --- |
+| `save_conversation_to_codex` | Create a durable local Codex thread from supplied `user`/`assistant` messages and group it under **Projects** using the selected workspace path. Supported on macOS and Windows. The tool writes to the current user's Codex history outside the FileMCP workspace and verifies the imported turns through Codex app-server before reporting success. |
+
+FileMCP discovers the Codex CLI from the normal platform installation paths and `PATH`. You can override discovery with `CODEX_BIN` on either platform; on Windows, `CODEX_CLI_PATH`, Codex Desktop resource locations under `%LOCALAPPDATA%\OpenAI\Codex`, and the standalone install under `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` / `%CODEX_HOME%\packages\standalone\current` are also recognized.
+
 ### Optional command execution
 
 ```text
 run_command(command, cwd="", timeout_seconds=30)
 ```
 
-`run_command` is exposed only when shell-command permission is enabled in FileMCP settings. It is intentionally not placed inside an OS-level sandbox.
+`run_command` is exposed only when shell-command permission is enabled in FileMCP settings. It is intentionally not placed inside an OS-level sandbox. For longer coding jobs, FileMCP also exposes `start_command`, `read_command_output`, and `cancel_command`: one runtime-owned job can stream bounded output through cursors, report a terminal state and exit code, and be cancelled with descendant cleanup.
 
 - macOS executes through the user's configured shell, falling back to `/bin/sh`.
 - Windows executes through Windows PowerShell with `-NoProfile -NonInteractive`.
@@ -210,10 +229,11 @@ FileMCP intentionally treats the local workspace as a privileged boundary.
 - macOS resolves symlink targets and validates existing ancestors against the configured workspace root.
 - Windows resolves existing paths through Win32 handles (`GetFinalPathNameByHandleW`) so NTFS junctions, symbolic links, and other reparse-point escapes cannot be treated as ordinary in-root paths.
 - Windows containment is case-insensitive and rejects rooted/UNC input supplied where a relative workspace path is required.
-- Recursive search does not traverse reparse-point directories.
+- Recursive search runs the bundled ripgrep with a fixed argument set (`--no-config`, no symlink following, no preprocessors or PCRE2). Patterns and globs are passed as single `--regexp=`/`--glob=` arguments, and every returned path is re-validated against the workspace root before it is reported or read.
 - File reads and writes are limited to **5 MB per request**.
 - Text responses and search previews are truncated to bounded sizes.
-- Recursive filename/content searches have visit, result, and byte-scan limits.
+- Searches respect `.gitignore`/`.ignore` files, skip `.git`, and skip the default excluded directories (`.venv`, `__pycache__`, `build`, `dist`, `node_modules`) unless `include_ignored` is set; `.git` is always skipped, including when explicitly targeted. Explicitly targeting one of the other default excluded directories as the search path remains available.
+- Search output, per-file size (1 MB), ripgrep subprocess runtime (30 s), `repo_overview` directory enumeration (50,000 entries), and `search_code` ranking budgets (2,000 files / 50 MB) are bounded. Results report `truncation_reasons` (for example `head_limit`, `preview_limit`, `output_limit`, `timeout`, `search_error`, `visited_limit`, `ignore_diagnostics_limit`) instead of silently implying complete coverage. Ranking scores are deterministic ordering heuristics, not confidence values.
 
 ### Git safety
 
@@ -365,7 +385,7 @@ Run the Windows integration suite:
 ./tests/test_windows_runtime.ps1
 ```
 
-The Windows suite exercises Credential Manager, NTFS junction/reparse-point containment, Job Object process cleanup, Git for Windows safe mode, legacy/modern MCP, and the full `tunnel-client` runtime lifecycle through an isolated fake tunnel client.
+The Windows suite exercises Credential Manager, NTFS junction/reparse-point containment, Job Object process cleanup, Git for Windows safe mode, Codex-history import through a disk-backed fake app-server, legacy/modern MCP, and the full `tunnel-client` runtime lifecycle through an isolated fake tunnel client. To additionally exercise an installed real Codex app-server and delete the fixture afterward, set `FILEMCP_REAL_CODEX_E2E=1` before running the suite.
 
 GitHub Actions runs both macOS and Windows verification jobs. See [`CONTRIBUTING.md`](CONTRIBUTING.md) before submitting changes, especially changes to path containment, Git safety, process execution, HTTP parsing, credential storage, or tunnel isolation.
 
@@ -408,27 +428,3 @@ Platform release builds are intentionally separate because signing/notarization 
 FileMCP source code is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE).
 
 The vendored OpenAI `tunnel-client` is distributed under its upstream license in [`vendor/tunnel-client/LICENSE`](vendor/tunnel-client/LICENSE). Its upstream `NOTICE` and platform third-party license evidence are preserved beside bundled binaries and copied into distributable app packages.
-
-
-## Codex project skills
-
-FileMCP can expose Codex Agent Skills stored inside the active shared workspace using the standard project layout:
-
-```text
-<shared-directory>/.agents/skills/<skill-name>/SKILL.md
-```
-
-Two read-only MCP tools are always exposed:
-
-| Tool | Purpose |
-| --- | --- |
-| `list_codex_skills` | List valid project skills discovered under `.agents/skills`. |
-| `load_codex_skill` | Load one skill's complete `SKILL.md` instructions by exact directory name. |
-
-FileMCP scans `.agents/skills` automatically whenever the local MCP server starts. If a requested skill was added after startup, `load_codex_skill` refreshes the registry once before reporting that the skill is missing.
-
-The MCP tool and server descriptions define `/name` as a skill-routing convention. For example, when FileMCP is available to the ChatGPT message, entering `/speckit-analyze` is intended to cause the model to call `load_codex_skill(name="speckit-analyze")` before answering and then follow the returned `SKILL.md`. This is not registration of a native ChatGPT slash-menu command or autocomplete entry.
-
-Skill loading is read-only and remains inside the configured shared directory. Skill names cannot contain path separators or traversal syntax, symlink/reparse-point escapes are refused, `SKILL.md` must be valid UTF-8, and a skill larger than 256 KB is rejected instead of being silently truncated. If the optional frontmatter `name` is present, it must exactly match the skill directory name.
-
-Skill discovery and loading are written to the FileMCP Logs view with a `[Skills]` prefix. The contents of `SKILL.md` are not copied into the application log.

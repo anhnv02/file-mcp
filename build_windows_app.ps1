@@ -17,6 +17,7 @@ $Rid = if ($Architecture -eq "arm64") { "win-arm64" } else { "win-x64" }
 $VendorTag = if ($Architecture -eq "arm64") { "windows-arm64" } else { "windows-amd64" }
 $TunnelClient = Join-Path $Root "vendor/tunnel-client/$VendorTag/tunnel-client.exe"
 $ThirdParty = Join-Path $Root "vendor/tunnel-client/$VendorTag/THIRD-PARTY-LICENSES.txt"
+$Ripgrep = Join-Path $Root "vendor/ripgrep/$VendorTag/rg.exe"
 $PublishDir = Join-Path $Root "dist/windows-$Architecture/FileMCP"
 $ZipPath = Join-Path $Root "dist/FileMCP-v0.4.0-windows-$Architecture.zip"
 
@@ -25,7 +26,11 @@ foreach ($Required in @(
     (Join-Path $Root "LICENSE"),
     (Join-Path $Root "vendor/tunnel-client/LICENSE"),
     (Join-Path $Root "vendor/tunnel-client/NOTICE"),
-    $ThirdParty
+    $ThirdParty,
+    $Ripgrep,
+    (Join-Path $Root "vendor/ripgrep/COPYING"),
+    (Join-Path $Root "vendor/ripgrep/LICENSE-MIT"),
+    (Join-Path $Root "vendor/ripgrep/UNLICENSE")
 )) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
         throw "Missing required release file: $Required"
@@ -51,6 +56,10 @@ Copy-Item (Join-Path $Root "LICENSE") (Join-Path $PublishDir "FileMCP-LICENSE.tx
 Copy-Item (Join-Path $Root "vendor/tunnel-client/LICENSE") (Join-Path $PublishDir "tunnel-client-LICENSE.txt")
 Copy-Item (Join-Path $Root "vendor/tunnel-client/NOTICE") (Join-Path $PublishDir "tunnel-client-NOTICE.txt")
 Copy-Item $ThirdParty (Join-Path $PublishDir "tunnel-client-THIRD-PARTY-LICENSES.txt")
+Copy-Item $Ripgrep (Join-Path $PublishDir "rg.exe")
+Copy-Item (Join-Path $Root "vendor/ripgrep/COPYING") (Join-Path $PublishDir "ripgrep-COPYING.txt")
+Copy-Item (Join-Path $Root "vendor/ripgrep/LICENSE-MIT") (Join-Path $PublishDir "ripgrep-LICENSE-MIT.txt")
+Copy-Item (Join-Path $Root "vendor/ripgrep/UNLICENSE") (Join-Path $PublishDir "ripgrep-UNLICENSE.txt")
 
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $PublishDir "*") -DestinationPath $ZipPath -CompressionLevel Optimal

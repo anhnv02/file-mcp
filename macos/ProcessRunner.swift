@@ -6,6 +6,8 @@ struct ProcessResult {
     let stdout: String
     let stderr: String
     let timedOut: Bool
+    var stdoutTruncated = false
+    var stderrTruncated = false
 }
 
 enum ProcessRunnerError: LocalizedError {
@@ -43,6 +45,12 @@ private final class BoundedDataBuffer {
         if chunk.count > remaining {
             omittedBytes += chunk.count - remaining
         }
+    }
+
+    var truncated: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return omittedBytes > 0
     }
 
     func string() -> String {
@@ -148,7 +156,9 @@ final class ProcessRunner {
             exitCode: decodeExitCode(status),
             stdout: stdoutBuffer.string(),
             stderr: stderrBuffer.string(),
-            timedOut: timedOut
+            timedOut: timedOut,
+            stdoutTruncated: stdoutBuffer.truncated,
+            stderrTruncated: stderrBuffer.truncated
         )
     }
 
@@ -379,27 +389,34 @@ final class ManagedProcess {
     }
 
     private func startReaders() {
-        let output = onOutput
-        readerGroup.enter()
-        ProcessRunner.readerQueue.async { [stdoutRead, readerGroup] in
-            defer { readerGroup.leave() }
-            do {
-                while let data = try stdoutRead.read(upToCount: 16_384), !data.isEmpty {
-                    output(String(decoding: data, as: UTF8.self))
+        for handle in [stdoutRead, stderrRead] {
+            readerGroup.enter()
+            ProcessRunner.readerQueue.async { [readerGroup, onOutput] in
+                defer { readerGroup.leave() }
+                var buffer = [UInt8](repeating: 0, count: 16_384)
+                var pending = Data()
+                while true {
+                    // POSIX read returns available pipe bytes immediately. Foundation's
+                    // read(upToCount:) can wait to fill the requested size on a pipe.
+                    let count = Darwin.read(handle.fileDescriptor, &buffer, buffer.count)
+                    if count < 0 && errno == EINTR { continue }
+                    if count <= 0 { break }
+                    pending.append(contentsOf: buffer.prefix(count))
+                    // Hold an incomplete UTF-8 suffix for the next chunk. Invalid
+                    // sequences elsewhere still use the normal replacement character.
+                    var end = pending.count
+                    var lead = end - 1
+                    while lead > 0 && (pending[lead] & 0xc0) == 0x80 { lead -= 1 }
+                    let byte = pending[lead]
+                    let width = byte >= 0xc2 && byte <= 0xdf ? 2 :
+                        (byte >= 0xe0 && byte <= 0xef ? 3 : (byte >= 0xf0 && byte <= 0xf4 ? 4 : 1))
+                    if width > end - lead { end = lead }
+                    if end > 0 {
+                        onOutput(String(decoding: pending.prefix(end), as: UTF8.self))
+                        pending = Data(pending.dropFirst(end))
+                    }
                 }
-            } catch {
-                // A coordinated shutdown can close the descriptor while a reader is blocked.
-            }
-        }
-        readerGroup.enter()
-        ProcessRunner.readerQueue.async { [stderrRead, readerGroup] in
-            defer { readerGroup.leave() }
-            do {
-                while let data = try stderrRead.read(upToCount: 16_384), !data.isEmpty {
-                    output(String(decoding: data, as: UTF8.self))
-                }
-            } catch {
-                // A coordinated shutdown can close the descriptor while a reader is blocked.
+                if !pending.isEmpty { onOutput(String(decoding: pending, as: UTF8.self)) }
             }
         }
     }

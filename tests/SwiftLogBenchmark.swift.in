@@ -1,0 +1,63 @@
+
+private var benchmarkFlushMS: [Double] = []
+extension MainViewController {
+    private func flushLogBuffer() {
+        let start = ProcessInfo.processInfo.systemUptime
+        benchmarkOriginalFlush()
+        benchmarkFlushMS.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+    }
+    static func benchmark() {
+        let args = CommandLine.arguments
+        let mode = args[1]
+        let rate = Int(args[2])!
+        let duration = Double(args[3])!
+        let controller = MainViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 410, height: 250), styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "FileMCP · Synthetic log benchmark"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 410, height: 250))
+        scroll.hasVerticalScroller = true
+        controller.logView.frame = scroll.bounds
+        controller.logView.isEditable = false
+        controller.logView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        scroll.documentView = controller.logView
+        window.contentView = scroll
+        BENCHMARK_FOLLOW_SETUP
+        if mode == "visible" { window.orderFront(nil) }
+        let line = "[12:34:56] INFO request completed: list_files workspace=/synthetic/project duration=12ms result=success\n"
+        if mode != "disabled" { controller.appendLog(String(repeating: line, count: 4900)) }
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+        benchmarkFlushMS.removeAll()
+        let startCPU = clock()
+        let start = ProcessInfo.processInfo.systemUptime
+        var sent = 0
+        var maxDelay = 0.0
+        var previous = start
+        var ticks = 0
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in
+            let now = ProcessInfo.processInfo.systemUptime
+            maxDelay = max(maxDelay, max(0, now - previous - 0.01))
+            previous = now
+            ticks += 1
+            let target = Int(min(duration, now - start) * Double(rate))
+            while sent < target {
+                if mode != "disabled" { controller.appendLog(line) }
+                sent += 1
+            }
+        }
+        while ProcessInfo.processInfo.systemUptime - start < duration {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        timer.invalidate()
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        let cpu = Double(clock() - startCPU) / Double(CLOCKS_PER_SEC)
+        var usage = rusage()
+        getrusage(RUSAGE_SELF, &usage)
+        let sorted = benchmarkFlushMS.sorted()
+        let p95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
+        let output: [String: Any] = ["mode": mode, "lines_per_sec": rate, "elapsed_sec": elapsed, "lines_sent": sent, "cpu_percent_one_core": cpu / elapsed * 100, "peak_rss_mb": Double(usage.ru_maxrss) / 1048576, "flush_p95_ms": p95, "flush_max_ms": sorted.last ?? 0, "timer_max_delay_ms": maxDelay * 1000, "ticks": ticks]
+        let data = try! JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
+        print(String(data: data, encoding: .utf8)!)
+        window.orderOut(nil)
+    }
+}
+func runBenchmark() { MainViewController.benchmark() }

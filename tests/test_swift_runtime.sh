@@ -21,6 +21,13 @@ stop_server() {
 }
 cleanup() {
     stop_server
+    if [ -n "${TMPDIR:-}" ]; then
+        TEST_ROOT="${TMPDIR%/}/filemcp-server-test"
+        TEST_OUTSIDE="${TMPDIR%/}/filemcp-server-outside"
+        chmod 700 "$TEST_ROOT/enumeration-error/locked" 2>/dev/null || true
+        chmod 600 "$TEST_ROOT/unreadable-file/secret.txt" 2>/dev/null || true
+        rm -rf "$TEST_ROOT" "$TEST_OUTSIDE" 2>/dev/null || true
+    fi
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -36,6 +43,12 @@ if [ "$MCP_HTTP_FUZZ_ITERATIONS" -lt 1 ]; then
     echo "MCP_HTTP_FUZZ_ITERATIONS must be at least 1" >&2
     exit 2
 fi
+
+MCP_EXTENDED_SEARCH_TESTS="${MCP_EXTENDED_SEARCH_TESTS:-0}"
+case "$MCP_EXTENDED_SEARCH_TESTS" in
+    0|1) ;;
+    *) echo "MCP_EXTENDED_SEARCH_TESTS must be 0 or 1" >&2; exit 2 ;;
+esac
 
 case "$(uname -m)" in
     arm64|aarch64) TUNNEL_TARGET="darwin-arm64" ;;
@@ -71,6 +84,16 @@ cat >"$TMP_DIR/main.swift" <<'SWIFT'
 import Foundation
 import Darwin
 
+func waitForProcessExit(_ pid: pid_t, timeoutSeconds: TimeInterval = 2.0) -> Bool {
+    guard pid > 0 else { return true }
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    repeat {
+        if kill(pid, 0) != 0, errno == ESRCH { return true }
+        usleep(50_000)
+    } while Date() < deadline
+    return kill(pid, 0) != 0 && errno == ESRCH
+}
+
 let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("filemcp-test-child.pid").path
 try? FileManager.default.removeItem(atPath: pidFile)
 let command = "sh -c 'sleep 20 & echo $! > \(pidFile); wait'"
@@ -82,8 +105,7 @@ let timed = try ProcessRunner.run(
 precondition(timed.timedOut, "command should time out")
 let childText = try String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
 let childPID = pid_t(Int(childText) ?? 0)
-usleep(200_000)
-precondition(childPID <= 0 || kill(childPID, 0) != 0, "timed-out child process survived")
+precondition(waitForProcessExit(childPID), "timed-out child process survived")
 print("process-tree-timeout: ok")
 
 let backgroundPIDFile = FileManager.default.temporaryDirectory.appendingPathComponent("filemcp-test-background-child.pid").path
@@ -97,8 +119,7 @@ precondition(!background.timedOut && background.exitCode == 0, "background paren
 let backgroundPIDText = try String(contentsOfFile: backgroundPIDFile, encoding: .utf8)
     .trimmingCharacters(in: .whitespacesAndNewlines)
 let backgroundPID = pid_t(Int(backgroundPIDText) ?? 0)
-usleep(300_000)
-precondition(backgroundPID <= 0 || kill(backgroundPID, 0) != 0, "background child survived successful parent exit")
+precondition(waitForProcessExit(backgroundPID), "background child survived successful parent exit")
 print("process-tree-normal-exit-cleanup: ok")
 
 for index in 0..<12 {
@@ -128,8 +149,7 @@ _ = managedBackground
 let managedChildText = try String(contentsOfFile: managedChildPIDFile, encoding: .utf8)
     .trimmingCharacters(in: .whitespacesAndNewlines)
 let managedChildPID = pid_t(Int(managedChildText) ?? 0)
-usleep(200_000)
-precondition(managedChildPID <= 0 || kill(managedChildPID, 0) != 0, "managed background child survived parent exit")
+precondition(waitForProcessExit(managedChildPID), "managed background child survived parent exit")
 print("managed-process-descendant-cleanup: ok")
 
 do {
@@ -362,7 +382,9 @@ SWIFT
 
 swiftc -framework Network -framework Security -o "$TMP_DIR/runtime-test" \
     macos/ProcessRunner.swift \
+    macos/Ripgrep.swift \
     macos/LocalMCPServer.swift \
+    macos/CodexHistory.swift \
     macos/LocalMCPRuntime.swift \
     "$TMP_DIR/main.swift"
 "$TMP_DIR/runtime-test"
@@ -423,10 +445,197 @@ for index in 1...205 {
         contents: Data()
     )
 }
+let scopeA = root.appendingPathComponent("scope-a")
+let scopeB = root.appendingPathComponent("scope-b")
+try FileManager.default.createDirectory(at: scopeA, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: scopeB, withIntermediateDirectories: true)
+try "a".write(to: scopeA.appendingPathComponent("scoped-target.txt"), atomically: true, encoding: .utf8)
+try "b".write(to: scopeB.appendingPathComponent("scoped-target.txt"), atomically: true, encoding: .utf8)
+let nextDirectory = root.appendingPathComponent(".next")
+try FileManager.default.createDirectory(at: nextDirectory, withIntermediateDirectories: true)
+try "generated".write(to: nextDirectory.appendingPathComponent("generated-target.txt"), atomically: true, encoding: .utf8)
+
+let ignoredProject = root.appendingPathComponent("ignored-project")
+try FileManager.default.createDirectory(at: ignoredProject.appendingPathComponent("generated"), withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: ignoredProject.appendingPathComponent("src"), withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: ignoredProject.appendingPathComponent(".git"), withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: ignoredProject.appendingPathComponent("generated/EmptyGenerated.xcodeproj"), withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: ignoredProject.appendingPathComponent("dotignored/EmptyIgnored.xcworkspace"), withIntermediateDirectories: true)
+try "generated/\n".write(to: ignoredProject.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+try "dotignored/\n".write(to: ignoredProject.appendingPathComponent(".ignore"), atomically: true, encoding: .utf8)
+try "ignore-probe\n".write(to: ignoredProject.appendingPathComponent("generated/output.txt"), atomically: true, encoding: .utf8)
+try "ignore-probe\n".write(to: ignoredProject.appendingPathComponent("src/kept.txt"), atomically: true, encoding: .utf8)
+try "ignore-probe\n".write(to: ignoredProject.appendingPathComponent(".git/probe.txt"), atomically: true, encoding: .utf8)
+
+let grepFixture = root.appendingPathComponent("grep-fixture")
+try FileManager.default.createDirectory(at: grepFixture, withIntermediateDirectories: true)
+try "let grepAlpha = 1\nlet grepAlpha2 = 2\nfunc grepBeta() {\n    grepAlpha\n}\n".write(
+    to: grepFixture.appendingPathComponent("alpha.swift"), atomically: true, encoding: .utf8
+)
+try "const GREPALPHA = 3;\nconst grepBeta = { start:\n  end };\n".write(
+    to: grepFixture.appendingPathComponent("beta.ts"), atomically: true, encoding: .utf8
+)
+let caseGlob = root.appendingPathComponent("case-glob")
+try FileManager.default.createDirectory(at: caseGlob, withIntermediateDirectories: true)
+try "case-probe\n".write(to: caseGlob.appendingPathComponent("ReadMe.MD"), atomically: true, encoding: .utf8)
+let globOrder = root.appendingPathComponent("glob-order")
+try FileManager.default.createDirectory(at: globOrder, withIntermediateDirectories: true)
+for (name, timestamp) in [("older.swift", 1_600_000_000.0), ("newer.swift", 1_700_000_000.0), ("middle.swift", 1_650_000_000.0)] {
+    let file = globOrder.appendingPathComponent(name)
+    try "order\n".write(to: file, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: timestamp)], ofItemAtPath: file.path)
+}
+
+let rankedSearchDirectory = root.appendingPathComponent("ranked-search")
+try FileManager.default.createDirectory(at: rankedSearchDirectory, withIntermediateDirectories: true)
+for index in 1...30 {
+    try "let usage_\(index) = QualityTarget()\n".write(
+        to: rankedSearchDirectory.appendingPathComponent(String(format: "usage-%02d.swift", index)),
+        atomically: true,
+        encoding: .utf8
+    )
+}
+try "final class QualityTarget {}\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("definition.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let fixture = \"final class StringOnlyTarget {}\"\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("string-fixture.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let call = TypedTarget()\nİ.obj.TypedTarget()\nprivate func TypedTarget() {}\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("typed-definition.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let used = TypedValueTarget\nprivate static int TypedValueTarget = 1;\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("typed-value.cs"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let call = GenericTarget<Int>(1)\nprivate TResult GenericTarget<TArg>(TArg value) => default!;\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("generic-method.cs"),
+    atomically: true,
+    encoding: .utf8
+)
+try "value = 1# class PythonCommentTarget: pass\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("python-comment.py"),
+    atomically: true,
+    encoding: .utf8
+)
+try "var raw = `\ntype GoRawStringTarget struct{}\n`\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("go-raw.go"),
+    atomically: true,
+    encoding: .utf8
+)
+try "echo ok # class ShellCommentTarget {}\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("shell-comment.sh"),
+    atomically: true,
+    encoding: .utf8
+)
+try "<#\nclass PowerShellBlockTarget {}\n#>\n#class PowerShellLineTarget {}\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("powershell-comment.ps1"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let exact = CaseTarget()\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("case-exact.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let lower = casetarget()\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("case-lower.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let ref = FilenameOnlyTarget()\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("FilenameOnlyTarget.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "let ref = FilenameMatchTarget()\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("prefix-FilenameMatchTarget-suffix.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "const AmbiguousTypeUsage& value = source;\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("ambiguous-type-usage.cpp"),
+    atomically: true,
+    encoding: .utf8
+)
+try "class AmbiguousTypeUsage {};\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("ambiguous-type-definition.hpp"),
+    atomically: true,
+    encoding: .utf8
+)
+try "const ConstantTarget = 1;\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("constant.js"),
+    atomically: true,
+    encoding: .utf8
+)
+try "static RustStaticTarget: i32 = 1;\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("static.rs"),
+    atomically: true,
+    encoding: .utf8
+)
+try "/*\nfinal class BlockCommentTarget {}\n/* nested */\nfinal class NestedBlockCommentTarget {}\n*/\nlet raw = \"\"\"\nfinal class MultilineStringTarget {}\n\"\"\"\nprivate func `EscapedTarget`() {}\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("lexical-state.swift"),
+    atomically: true,
+    encoding: .utf8
+)
+try "const raw = `\nclass TemplateStringTarget {}\n`;\n".write(
+    to: rankedSearchDirectory.appendingPathComponent("lexical-template.ts"),
+    atomically: true,
+    encoding: .utf8
+)
+
+let overviewProject = root.appendingPathComponent("overview-project")
+try FileManager.default.createDirectory(at: overviewProject.appendingPathComponent("src"), withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: overviewProject.appendingPathComponent("tests"), withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: overviewProject.appendingPathComponent("node_modules/ignored"), withIntermediateDirectories: true)
+try "{}".write(to: overviewProject.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+try "export const main = 1\n".write(to: overviewProject.appendingPathComponent("src/main.ts"), atomically: true, encoding: .utf8)
+try "export const test = 1\n".write(to: overviewProject.appendingPathComponent("tests/main.test.ts"), atomically: true, encoding: .utf8)
+try "hidden\n".write(to: overviewProject.appendingPathComponent("node_modules/ignored/hidden.ts"), atomically: true, encoding: .utf8)
+try "{}".write(to: overviewProject.appendingPathComponent("node_modules/ignored/package.json"), atomically: true, encoding: .utf8)
+let xcodeProject = overviewProject.appendingPathComponent("Demo.xcodeproj")
+try FileManager.default.createDirectory(at: xcodeProject, withIntermediateDirectories: true)
+try "project-marker\n".write(
+    to: xcodeProject.appendingPathComponent("project.pbxproj"),
+    atomically: true,
+    encoding: .utf8
+)
+try FileManager.default.createDirectory(
+    at: overviewProject.appendingPathComponent("empty-dir"),
+    withIntermediateDirectories: true
+)
+try FileManager.default.createDirectory(
+    at: overviewProject.appendingPathComponent("EmptyProject.xcodeproj"),
+    withIntermediateDirectories: true
+)
+try FileManager.default.createDirectory(
+    at: overviewProject.appendingPathComponent("EmptyWorkspace.xcworkspace"),
+    withIntermediateDirectories: true
+)
+
+let caseExcludedProject = root.appendingPathComponent("case-exclusion-project")
+try FileManager.default.createDirectory(
+    at: caseExcludedProject.appendingPathComponent("NODE_MODULES/ignored"),
+    withIntermediateDirectories: true
+)
+try "case-hidden\n".write(
+    to: caseExcludedProject.appendingPathComponent("NODE_MODULES/ignored/hidden.ts"),
+    atomically: true,
+    encoding: .utf8
+)
+
 let outside = FileManager.default.temporaryDirectory.appendingPathComponent("filemcp-server-outside")
 try? FileManager.default.removeItem(at: outside)
 try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
 try "must stay private".write(to: outside.appendingPathComponent("secret.txt"), atomically: true, encoding: .utf8)
+try "{}".write(to: outside.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
 try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("escape"), withDestinationURL: outside)
 try "keep target".write(to: root.appendingPathComponent("delete-target.txt"), atomically: true, encoding: .utf8)
 let deleteTargetDirectory = root.appendingPathComponent("delete-target-dir")
@@ -488,11 +697,13 @@ SWIFT
 
 swiftc -framework Network -o "$TMP_DIR/server-test" \
     macos/ProcessRunner.swift \
+    macos/Ripgrep.swift \
     macos/LocalMCPServer.swift \
+    macos/CodexHistory.swift \
     "$TMP_DIR/main.swift"
 mkdir -p "$TMP_DIR/git-template"
 printf 'outside-template-marker\n' > "$TMP_DIR/git-template/copied-from-template"
-GIT_TEMPLATE_DIR="$TMP_DIR/git-template" "$TMP_DIR/server-test" &
+FILEMCP_RG="$PWD/vendor/ripgrep/darwin-arm64/rg" GIT_TEMPLATE_DIR="$TMP_DIR/git-template" "$TMP_DIR/server-test" &
 SERVER_PID=$!
 sleep 1
 
@@ -545,6 +756,18 @@ if printf '%s' "$SAFE_TOOLS" | grep -q '"name":"run_command"'; then
     echo "run_command must not be exposed while command execution is disabled" >&2
     exit 1
 fi
+printf '%s' "$SAFE_TOOLS" | grep -q '"name":"save_conversation_to_codex"'
+printf '%s' "$SAFE_TOOLS" | grep -q '"name":"search_code"'
+printf '%s' "$SAFE_TOOLS" | grep -q '"name":"repo_overview"'
+printf '%s' "$SAFE_TOOLS" | grep -q '"name":"batch_read"'
+printf '%s' "$SAFE_TOOLS" | grep -q '"name":"apply_patch"'
+printf '%s' "$SAFE_TOOLS" | grep -q '"name":"workspace_context"'
+
+INVALID_CODEX_MESSAGES="$(curl -fsS -X POST "$SAFE_BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":391,"method":"tools/call","params":{"name":"save_conversation_to_codex","arguments":{"title":"invalid fixture","messages":[{"role":"system","content":"must be rejected"}]}}}')"
+printf '%s' "$INVALID_CODEX_MESSAGES" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$INVALID_CODEX_MESSAGES" | grep -q 'role must be user or assistant'
 
 NEGATIVE_LENGTH="$(printf 'POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nContent-Type: application/json\r\nContent-Length: -1\r\n\r\n' | nc 127.0.0.1 18088)"
 printf '%s' "$NEGATIVE_LENGTH" | grep -q 'HTTP/1.1 400 Bad Request'
@@ -683,32 +906,335 @@ if printf '%s' "$LIST_LIMIT_RESULT" | grep -q '\[\.\.\.truncated'; then
     exit 1
 fi
 
-FILENAME_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+tool_call() {
+    curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}"
+}
+extract() {
+    plutil -extract "result.structuredContent.$1" "$2" -o - -
+}
+
+GLOB_RESULT="$(tool_call 301 glob '{"pattern":"sample.swift"}')"
+printf '%s' "$GLOB_RESULT" | extract files raw | grep -qx '1'
+printf '%s' "$GLOB_RESULT" | extract files.0 raw | grep -qx 'sample.swift'
+if printf '%s' "$GLOB_RESULT" | grep -q '/private'; then
+    echo "glob returned a non-relative canonical path" >&2
+    exit 1
+fi
+printf '%s' "$GLOB_RESULT" | extract truncated raw | grep -qx 'false'
+printf '%s' "$GLOB_RESULT" | grep -q '"next_offset":null'
+
+SCOPED_GLOB_RESULT="$(tool_call 3011 glob '{"pattern":"scoped-target*","path":"scope-a"}')"
+printf '%s' "$SCOPED_GLOB_RESULT" | extract files raw | grep -qx '1'
+printf '%s' "$SCOPED_GLOB_RESULT" | extract files.0 raw | grep -qx 'scope-a/scoped-target.txt'
+
+BROAD_GENERATED_GLOB_RESULT="$(tool_call 3012 glob '{"pattern":"generated-target.txt"}')"
+printf '%s' "$BROAD_GENERATED_GLOB_RESULT" | extract files.0 raw | grep -qx '.next/generated-target.txt'
+EXPLICIT_GENERATED_GLOB_RESULT="$(tool_call 3013 glob '{"pattern":"*","path":".next"}')"
+printf '%s' "$EXPLICIT_GENERATED_GLOB_RESULT" | extract files.0 raw | grep -qx '.next/generated-target.txt'
+
+BROAD_GENERATED_CONTENT_RESULT="$(tool_call 3014 grep '{"pattern":"generated","path":".next","output_mode":"content"}')"
+printf '%s' "$BROAD_GENERATED_CONTENT_RESULT" | extract matches.0.path raw | grep -qx '.next/generated-target.txt'
+BROAD_GENERATED_FILES_RESULT="$(tool_call 3015 grep '{"pattern":"^generated$"}')"
+printf '%s' "$BROAD_GENERATED_FILES_RESULT" | extract files.0 raw | grep -qx '.next/generated-target.txt'
+
+GREP_HEAD_LIMIT="$(tool_call 3016 grep '{"pattern":"QualityTarget","path":"ranked-search","head_limit":1}')"
+printf '%s' "$GREP_HEAD_LIMIT" | extract truncated raw | grep -qx 'true'
+printf '%s' "$GREP_HEAD_LIMIT" | extract truncation_reasons json | grep -q 'head_limit'
+printf '%s' "$GREP_HEAD_LIMIT" | extract next_offset raw | grep -qx '1'
+printf '%s' "$GREP_HEAD_LIMIT" | extract total raw | grep -qx '31'
+GREP_SECOND_PAGE="$(tool_call 3043 grep '{"pattern":"QualityTarget","path":"ranked-search","head_limit":30,"offset":1}')"
+printf '%s' "$GREP_SECOND_PAGE" | extract returned raw | grep -qx '30'
+printf '%s' "$GREP_SECOND_PAGE" | grep -q '"next_offset":null'
+
+IGNORED_DEFAULT="$(tool_call 3044 grep '{"pattern":"ignore-probe","path":"ignored-project"}')"
+printf '%s' "$IGNORED_DEFAULT" | extract files raw | grep -qx '1'
+printf '%s' "$IGNORED_DEFAULT" | extract files.0 raw | grep -qx 'ignored-project/src/kept.txt'
+IGNORED_INCLUDED="$(tool_call 3045 grep '{"pattern":"ignore-probe","path":"ignored-project","include_ignored":true}')"
+printf '%s' "$IGNORED_INCLUDED" | extract total raw | grep -qx '2'
+printf '%s' "$IGNORED_INCLUDED" | grep -q 'ignored-project\\/generated\\/output.txt\|ignored-project/generated/output.txt'
+if printf '%s' "$IGNORED_INCLUDED" | grep -q 'probe.txt'; then
+    echo "include_ignored must still exclude .git" >&2
+    exit 1
+fi
+IGNORED_GLOB="$(tool_call 3046 glob '{"pattern":"*.txt","path":"ignored-project"}')"
+printf '%s' "$IGNORED_GLOB" | extract files raw | grep -qx '1'
+printf '%s' "$IGNORED_GLOB" | extract files.0 raw | grep -qx 'ignored-project/src/kept.txt'
+IGNORED_DEFAULT_OVERVIEW="$(tool_call 30469 repo_overview '{"path":"ignored-project"}')"
+printf '%s' "$IGNORED_DEFAULT_OVERVIEW" | extract files_seen raw | grep -qx '3'
+printf '%s' "$IGNORED_DEFAULT_OVERVIEW" | extract directories_seen raw | grep -qx '1'
+if printf '%s' "$IGNORED_DEFAULT_OVERVIEW" | grep -q 'EmptyGenerated.xcodeproj\|EmptyIgnored.xcworkspace'; then
+    echo "repo_overview leaked ignored empty manifests" >&2
+    exit 1
+fi
+IGNORED_OVERVIEW="$(tool_call 3047 repo_overview '{"path":"ignored-project","include_ignored":true}')"
+printf '%s' "$IGNORED_OVERVIEW" | extract files_seen raw | grep -qx '4'
+printf '%s' "$IGNORED_OVERVIEW" | extract directories_seen raw | grep -qx '5'
+printf '%s' "$IGNORED_OVERVIEW" | plutil -extract result.structuredContent.manifests json -o - - | grep -q 'EmptyGenerated.xcodeproj'
+printf '%s' "$IGNORED_OVERVIEW" | plutil -extract result.structuredContent.manifests json -o - - | grep -q 'EmptyIgnored.xcworkspace'
+DIRECT_GIT_GREP="$(tool_call 30471 grep '{"pattern":"ignore-probe","path":"ignored-project/.git"}')"
+printf '%s' "$DIRECT_GIT_GREP" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$DIRECT_GIT_GREP" | grep -q '.git is always excluded from search'
+DIRECT_GIT_FILE_GREP="$(tool_call 304711 grep '{"pattern":"ignore-probe","path":"ignored-project/.git/probe.txt","include_ignored":true}')"
+printf '%s' "$DIRECT_GIT_FILE_GREP" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$DIRECT_GIT_FILE_GREP" | grep -q '.git is always excluded from search'
+DIRECT_GIT_GLOB="$(tool_call 30472 glob '{"pattern":"*","path":"ignored-project/.git","include_ignored":true}')"
+printf '%s' "$DIRECT_GIT_GLOB" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+DIRECT_GIT_CODE="$(tool_call 30473 search_code '{"queries":["ignore-probe"],"path":"ignored-project/.git","include_ignored":true}')"
+printf '%s' "$DIRECT_GIT_CODE" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+DIRECT_GIT_OVERVIEW="$(tool_call 30474 repo_overview '{"path":"ignored-project/.git","include_ignored":true}')"
+printf '%s' "$DIRECT_GIT_OVERVIEW" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+
+GREP_CONTENT="$(tool_call 3048 grep '{"pattern":"grepAlpha\\b","path":"grep-fixture","output_mode":"content","context":1}')"
+printf '%s' "$GREP_CONTENT" | extract total raw | grep -qx '2'
+printf '%s' "$GREP_CONTENT" | extract matches.0.path raw | grep -qx 'grep-fixture/alpha.swift'
+printf '%s' "$GREP_CONTENT" | extract matches.0.line raw | grep -qx '1'
+printf '%s' "$GREP_CONTENT" | extract matches.0.before raw | grep -qx '0'
+printf '%s' "$GREP_CONTENT" | extract matches.0.after.0.text raw | grep -qx 'let grepAlpha2 = 2'
+printf '%s' "$GREP_CONTENT" | extract matches.1.line raw | grep -qx '4'
+printf '%s' "$GREP_CONTENT" | extract matches.1.before.0.line raw | grep -qx '3'
+GREP_INSENSITIVE_COUNT="$(tool_call 3049 grep '{"pattern":"grepalpha","fixed_strings":true,"case_insensitive":true,"path":"grep-fixture","output_mode":"count"}')"
+printf '%s' "$GREP_INSENSITIVE_COUNT" | extract counts json | grep -q '"count":3'
+printf '%s' "$GREP_INSENSITIVE_COUNT" | extract counts.1.path raw | grep -qx 'grep-fixture/beta.ts'
+printf '%s' "$GREP_INSENSITIVE_COUNT" | extract counts.1.count raw | grep -qx '1'
+GREP_TYPE="$(tool_call 3050 grep '{"pattern":"grepBeta","path":"grep-fixture","type":"ts"}')"
+printf '%s' "$GREP_TYPE" | extract files raw | grep -qx '1'
+printf '%s' "$GREP_TYPE" | extract files.0 raw | grep -qx 'grep-fixture/beta.ts'
+GREP_GLOB="$(tool_call 3051 grep '{"pattern":"grepBeta","path":"grep-fixture","glob":"*.swift"}')"
+printf '%s' "$GREP_GLOB" | extract files raw | grep -qx '1'
+printf '%s' "$GREP_GLOB" | extract files.0 raw | grep -qx 'grep-fixture/alpha.swift'
+GREP_FILE_PATH="$(tool_call 3052 grep '{"pattern":"grepBeta","path":"grep-fixture/beta.ts","output_mode":"content"}')"
+printf '%s' "$GREP_FILE_PATH" | extract matches.0.path raw | grep -qx 'grep-fixture/beta.ts'
+GREP_MULTILINE="$(tool_call 3053 grep '{"pattern":"start:.*end","path":"grep-fixture","multiline":true,"output_mode":"content"}')"
+printf '%s' "$GREP_MULTILINE" | extract total raw | grep -qx '2'
+printf '%s' "$GREP_MULTILINE" | extract matches.1.text raw | grep -qx '  end };'
+GREP_INVALID_TYPE="$(tool_call 3054 grep '{"pattern":"x","type":"not a type"}')"
+printf '%s' "$GREP_INVALID_TYPE" | plutil -extract result.isError raw -o - - | grep -qx 'true'
+GREP_UNKNOWN_TYPE="$(tool_call 3055 grep '{"pattern":"x","type":"definitelynotatype"}')"
+printf '%s' "$GREP_UNKNOWN_TYPE" | plutil -extract result.isError raw -o - - | grep -qx 'true'
+GREP_BAD_REGEX="$(tool_call 3056 grep '{"pattern":"(unclosed"}')"
+printf '%s' "$GREP_BAD_REGEX" | plutil -extract result.isError raw -o - - | grep -qx 'true'
+printf '%s' "$GREP_BAD_REGEX" | grep -q 'regex parse error'
+GREP_BAD_MODE="$(tool_call 3057 grep '{"pattern":"x","output_mode":"lines"}')"
+printf '%s' "$GREP_BAD_MODE" | grep -q 'Argument output_mode must be one of'
+GREP_OPTION_PATTERN="$(tool_call 3058 grep '{"pattern":"--pre=/usr/bin/touch","path":"grep-fixture"}')"
+printf '%s' "$GREP_OPTION_PATTERN" | plutil -extract result.isError raw -o - - | grep -qx 'false'
+printf '%s' "$GREP_OPTION_PATTERN" | extract total raw | grep -qx '0'
+GLOB_OPTION_PATTERN="$(tool_call 3059 glob '{"pattern":"--pre=/usr/bin/touch","path":"grep-fixture"}')"
+printf '%s' "$GLOB_OPTION_PATTERN" | plutil -extract result.isError raw -o - - | grep -qx 'false'
+printf '%s' "$GLOB_OPTION_PATTERN" | extract total raw | grep -qx '0'
+GLOB_ORDER="$(tool_call 3060 glob '{"pattern":"*.swift","path":"glob-order","head_limit":2}')"
+printf '%s' "$GLOB_ORDER" | extract files raw | grep -qx '2'
+printf '%s' "$GLOB_ORDER" | extract files.0 raw | grep -qx 'glob-order/newer.swift'
+printf '%s' "$GLOB_ORDER" | extract files.1 raw | grep -qx 'glob-order/middle.swift'
+printf '%s' "$GLOB_ORDER" | extract next_offset raw | grep -qx '2'
+GLOB_CASE="$(tool_call 3064 glob '{"pattern":"*readme*","path":"case-glob"}')"
+printf '%s' "$GLOB_CASE" | extract files.0 raw | grep -qx 'case-glob/ReadMe.MD'
+GREP_GLOB_CASE="$(tool_call 3065 grep '{"pattern":"case-probe","path":"case-glob","glob":"*.md"}')"
+printf '%s' "$GREP_GLOB_CASE" | extract total raw | grep -qx '1'
+GLOB_ESCAPE="$(tool_call 3061 glob '{"pattern":"**/secret.txt"}')"
+printf '%s' "$GLOB_ESCAPE" | extract total raw | grep -qx '0'
+GREP_ESCAPE="$(tool_call 3062 grep '{"pattern":"must stay private","output_mode":"content"}')"
+if printf '%s' "$GREP_ESCAPE" | grep -q 'secret.txt'; then
+    echo "grep escaped through symlink" >&2
+    exit 1
+fi
+echo "grep-glob: ok"
+
+RANKED_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"search_filenames","arguments":{"query":"sample.swift"}}}')"
-printf '%s' "$FILENAME_RESULT" | plutil -extract result.structuredContent.result json -o - - | grep -qx '\["sample.swift"\]'
-if printf '%s' "$FILENAME_RESULT" | grep -q '/private'; then
-    echo "search_filenames returned a non-relative canonical path" >&2
+    -d '{"jsonrpc":"2.0","id":3017,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["QualityTarget","class QualityTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.truncated raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.truncation_reasons raw -expect array -o - - | grep -qx '0'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.files_matched raw -expect integer -o - - | grep -qx '31'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.files_ranked raw -expect integer -o - - | grep -qx '31'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '31'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.returned_matches raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.result_limit_reached raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/definition.swift'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals json -o - - | grep -q 'likely_declaration'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.1.observed_matching_lines raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$RANKED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.1.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/definition.swift'
+
+TYPED_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3026,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["TypedTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$TYPED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/typed-definition.swift'
+printf '%s' "$TYPED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.line raw -expect integer -o - - | grep -qx '3'
+printf '%s' "$TYPED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals json -o - - | grep -q 'likely_declaration'
+
+TYPED_VALUE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3028,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["TypedValueTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$TYPED_VALUE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/typed-value.cs'
+printf '%s' "$TYPED_VALUE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.line raw -expect integer -o - - | grep -qx '2'
+printf '%s' "$TYPED_VALUE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals json -o - - | grep -q 'likely_declaration'
+
+GENERIC_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3030,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["GenericTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$GENERIC_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/generic-method.cs'
+printf '%s' "$GENERIC_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.line raw -expect integer -o - - | grep -qx '2'
+printf '%s' "$GENERIC_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals json -o - - | grep -q 'likely_declaration'
+
+CASE_INSENSITIVE_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3031,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["CaseTarget"],"path":"ranked-search","max_results_per_query":2}}}')"
+printf '%s' "$CASE_INSENSITIVE_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '2'
+printf '%s' "$CASE_INSENSITIVE_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/case-exact.swift'
+printf '%s' "$CASE_INSENSITIVE_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals json -o - - | grep -q 'exact_case'
+
+CASE_SENSITIVE_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3032,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["CaseTarget"],"path":"ranked-search","case_sensitive":true,"max_results_per_query":2}}}')"
+printf '%s' "$CASE_SENSITIVE_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$CASE_SENSITIVE_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/case-exact.swift'
+
+FILENAME_SIGNAL_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3033,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["FilenameOnlyTarget","FilenameMatchTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$FILENAME_SIGNAL_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals json -o - - | grep -q 'filename_exact'
+printf '%s' "$FILENAME_SIGNAL_RESULT" | plutil -extract result.structuredContent.query_results.1.matches.0.signals json -o - - | grep -q 'filename_match'
+
+AMBIGUOUS_DECL_RESULT="$(curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3042,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["AmbiguousTypeUsage","ConstantTarget","RustStaticTarget"],"path":"ranked-search","max_results_per_query":2}}}')"
+printf '%s' "$AMBIGUOUS_DECL_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'ranked-search/ambiguous-type-definition.hpp'
+printf '%s' "$AMBIGUOUS_DECL_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.1.signals json -o - - | grep -vq 'likely_declaration'
+printf '%s' "$AMBIGUOUS_DECL_RESULT" | plutil -extract result.structuredContent.query_results.1.matches.0.signals json -o - - | grep -q 'likely_declaration'
+printf '%s' "$AMBIGUOUS_DECL_RESULT" | plutil -extract result.structuredContent.query_results.2.matches.0.signals json -o - - | grep -q 'likely_declaration'
+
+PYTHON_COMMENT_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3034,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["PythonCommentTarget","GoRawStringTarget","ShellCommentTarget","PowerShellBlockTarget","PowerShellLineTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$PYTHON_COMMENT_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$PYTHON_COMMENT_RESULT" | plutil -extract result.structuredContent.query_results.1.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$PYTHON_COMMENT_RESULT" | plutil -extract result.structuredContent.query_results.2.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$PYTHON_COMMENT_RESULT" | plutil -extract result.structuredContent.query_results.3.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$PYTHON_COMMENT_RESULT" | plutil -extract result.structuredContent.query_results.4.matches.0.signals raw -expect array -o - - | grep -qx '0'
+
+STRING_FIXTURE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3027,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["StringOnlyTarget"],"path":"ranked-search","max_results_per_query":2}}}')"
+printf '%s' "$STRING_FIXTURE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals raw -expect array -o - - | grep -qx '0'
+
+LEXICAL_STATE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3029,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["BlockCommentTarget","NestedBlockCommentTarget","MultilineStringTarget","EscapedTarget","TemplateStringTarget"],"path":"ranked-search","max_results_per_query":2}}}')"
+printf '%s' "$LEXICAL_STATE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$LEXICAL_STATE_RESULT" | plutil -extract result.structuredContent.query_results.1.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$LEXICAL_STATE_RESULT" | plutil -extract result.structuredContent.query_results.2.matches.0.signals raw -expect array -o - - | grep -qx '0'
+printf '%s' "$LEXICAL_STATE_RESULT" | plutil -extract result.structuredContent.query_results.3.matches.0.signals json -o - - | grep -q 'likely_declaration'
+printf '%s' "$LEXICAL_STATE_RESULT" | plutil -extract result.structuredContent.query_results.4.matches.0.signals raw -expect array -o - - | grep -qx '0'
+
+RANKED_GENERATED_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3018,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["generated"],"max_results_per_query":1}}}')"
+printf '%s' "$RANKED_GENERATED_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx '.next/generated-target.txt'
+
+RANKED_ESCAPE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3019,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["must stay private"],"max_results_per_query":3}}}')"
+printf '%s' "$RANKED_ESCAPE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '0'
+if printf '%s' "$RANKED_ESCAPE_RESULT" | grep -q 'secret.txt'; then
+    echo "search_code escaped through symlink" >&2
     exit 1
 fi
 
-printf '%s' "$FILENAME_RESULT" | plutil -extract result.structuredContent.truncated raw -expect bool -o - - | grep -qx 'false'
-
-FILENAME_LIMIT_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+INVALID_RANKED_QUERY="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":306,"method":"tools/call","params":{"name":"search_filenames","arguments":{"query":"filename-target-"}}}')"
-printf '%s' "$FILENAME_LIMIT_RESULT" | plutil -extract result.structuredContent.result raw -expect array -o - - | grep -qx '200'
-printf '%s' "$FILENAME_LIMIT_RESULT" | plutil -extract result.structuredContent.truncated raw -expect bool -o - - | grep -qx 'true'
-if printf '%s' "$FILENAME_LIMIT_RESULT" | grep -q '\[\.\.\.search stopped'; then
-    echo "search_filenames leaked truncation marker into filename results" >&2
+    -d '{"jsonrpc":"2.0","id":3020,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":[123]}}}')"
+printf '%s' "$INVALID_RANKED_QUERY" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$INVALID_RANKED_QUERY" | grep -q 'queries\[0\] must be a string'
+
+SIX_RANKED_QUERIES="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3036,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["QualityTarget","TypedTarget","TypedValueTarget","GenericTarget","CaseTarget","FilenameOnlyTarget"],"path":"ranked-search","max_results_per_query":1}}}')"
+printf '%s' "$SIX_RANKED_QUERIES" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$SIX_RANKED_QUERIES" | plutil -extract result.structuredContent.query_results raw -expect array -o - - | grep -qx '6'
+
+SEVEN_RANKED_QUERIES="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3037,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["a","b","c","d","e","f","g"]}}}')"
+printf '%s' "$SEVEN_RANKED_QUERIES" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$SEVEN_RANKED_QUERIES" | grep -q 'at most 6'
+
+QUERY_500="$(printf '%0500d' 0 | tr '0' x)"
+QUERY_501="${QUERY_500}x"
+QUERY_500_RESULT="$(curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":3038,\"method\":\"tools/call\",\"params\":{\"name\":\"search_code\",\"arguments\":{\"queries\":[\"$QUERY_500\"],\"path\":\"ranked-search\"}}}")"
+printf '%s' "$QUERY_500_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'false'
+QUERY_501_RESULT="$(curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":3039,\"method\":\"tools/call\",\"params\":{\"name\":\"search_code\",\"arguments\":{\"queries\":[\"$QUERY_501\"],\"path\":\"ranked-search\"}}}")"
+printf '%s' "$QUERY_501_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$QUERY_501_RESULT" | grep -q 'longer than 500 characters'
+
+OVERVIEW_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3021,"method":"tools/call","params":{"name":"repo_overview","arguments":{"path":"overview-project"}}}')"
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.top_level_entries json -o - - | grep -q 'package.json'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.manifests json -o - - | grep -q 'package.json'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.manifests json -o - - | grep -q 'Demo.xcodeproj'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.manifests json -o - - | grep -q 'EmptyProject.xcodeproj'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.manifests json -o - - | grep -q 'EmptyWorkspace.xcworkspace'
+OVERVIEW_DIRECTORIES="$(printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.directories_seen raw -expect integer -o - -)"
+test "$OVERVIEW_DIRECTORIES" -ge 6
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.default_excluded_directory_names json -o - - | grep -q 'node_modules'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.file_extensions.0.extension raw -expect string -o - - | grep -qx '.ts'
+printf '%s' "$OVERVIEW_RESULT" | plutil -extract result.structuredContent.file_extensions.0.count raw -expect integer -o - - | grep -qx '2'
+if printf '%s' "$OVERVIEW_RESULT" | grep -q 'node_modules/ignored/package.json'; then
+    echo "repo_overview traversed an excluded dependency directory" >&2
     exit 1
 fi
 
-EMPTY_FILENAME_QUERY="$(curl -fsS -X POST "$BASE_URL" \
+XCODE_CONTENT_RESULT="$(curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3040,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["project-marker"],"path":"overview-project","max_results_per_query":2}}}')"
+printf '%s' "$XCODE_CONTENT_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$XCODE_CONTENT_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'overview-project/Demo.xcodeproj/project.pbxproj'
+XCODE_FILENAME_RESULT="$(tool_call 3041 glob '{"pattern":"project.pbxproj","path":"overview-project"}')"
+printf '%s' "$XCODE_FILENAME_RESULT" | extract files.0 raw | grep -qx 'overview-project/Demo.xcodeproj/project.pbxproj'
+
+BROAD_EXCLUDED_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":307,"method":"tools/call","params":{"name":"search_filenames","arguments":{"query":""}}}')"
-printf '%s' "$EMPTY_FILENAME_QUERY" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
-printf '%s' "$EMPTY_FILENAME_QUERY" | grep -q 'query must not be empty'
+    -d '{"jsonrpc":"2.0","id":3023,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["hidden"],"path":"overview-project","max_results_per_query":2}}}')"
+printf '%s' "$BROAD_EXCLUDED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '0'
+printf '%s' "$BROAD_EXCLUDED_CODE_RESULT" | plutil -extract result.structuredContent.default_excluded_directory_names json -o - - | grep -q 'node_modules'
+
+CASE_EXCLUDED_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3035,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["case-hidden"],"path":"case-exclusion-project","max_results_per_query":2}}}')"
+printf '%s' "$CASE_EXCLUDED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '0'
+
+EXPLICIT_EXCLUDED_CODE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3024,"method":"tools/call","params":{"name":"search_code","arguments":{"queries":["hidden"],"path":"overview-project/node_modules","max_results_per_query":2}}}')"
+printf '%s' "$EXPLICIT_EXCLUDED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.observed_matching_lines raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$EXPLICIT_EXCLUDED_CODE_RESULT" | plutil -extract result.structuredContent.query_results.0.matches.0.path raw -expect string -o - - | grep -qx 'overview-project/node_modules/ignored/hidden.ts'
+
+EXPLICIT_EXCLUDED_OVERVIEW_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3025,"method":"tools/call","params":{"name":"repo_overview","arguments":{"path":"overview-project/node_modules"}}}')"
+printf '%s' "$EXPLICIT_EXCLUDED_OVERVIEW_RESULT" | plutil -extract result.structuredContent.manifests.0 raw -expect string -o - - | grep -qx 'overview-project/node_modules/ignored/package.json'
+
+ROOT_OVERVIEW_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":3022,"method":"tools/call","params":{"name":"repo_overview","arguments":{}}}')"
+if printf '%s' "$ROOT_OVERVIEW_RESULT" | grep -q 'escape/package.json'; then
+    echo "repo_overview escaped through symlink" >&2
+    exit 1
+fi
+
+GLOB_LIMIT_RESULT="$(tool_call 306 glob '{"pattern":"filename-target-*","head_limit":1000}')"
+printf '%s' "$GLOB_LIMIT_RESULT" | extract files raw | grep -qx '205'
+GLOB_PAGE_RESULT="$(tool_call 3063 glob '{"pattern":"filename-target-*","head_limit":200}')"
+printf '%s' "$GLOB_PAGE_RESULT" | extract files raw | grep -qx '200'
+printf '%s' "$GLOB_PAGE_RESULT" | extract truncated raw | grep -qx 'true'
+printf '%s' "$GLOB_PAGE_RESULT" | extract total raw | grep -qx '205'
+
+EMPTY_GLOB_QUERY="$(tool_call 307 glob '{"pattern":""}')"
+printf '%s' "$EMPTY_GLOB_QUERY" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$EMPTY_GLOB_QUERY" | grep -q 'pattern must be 1...500 characters'
 
 INVALID_OPTIONAL_TYPE="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -730,25 +1256,21 @@ printf '%s' "$NON_OBJECT_ARGUMENTS" | grep -q 'Invalid arguments: expected an ob
 
 OUT_OF_RANGE_OPTIONAL="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":305,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"needle","context_lines":11}}}')"
+    -d '{"jsonrpc":"2.0","id":305,"method":"tools/call","params":{"name":"grep","arguments":{"pattern":"needle","context":11}}}')"
 printf '%s' "$OUT_OF_RANGE_OPTIONAL" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
-printf '%s' "$OUT_OF_RANGE_OPTIONAL" | grep -q 'Argument context_lines must be &lt;= 10\|Argument context_lines must be <= 10'
+printf '%s' "$OUT_OF_RANGE_OPTIONAL" | grep -q 'Argument context must be &lt;= 10\|Argument context must be <= 10'
 
-SEARCH_RESULT="$(curl -fsS -X POST "$BASE_URL" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"needle-target","path":"","context_lines":1,"max_results":10}}}')"
-printf '%s' "$SEARCH_RESULT" | grep -q 'sample.swift'
-printf '%s' "$SEARCH_RESULT" | grep -q 'line.*4'
-printf '%s' "$SEARCH_RESULT" | grep -q 'needle-target'
-printf '%s' "$SEARCH_RESULT" | plutil -extract result.structuredContent.matches.0.path raw -expect string -o - - | grep -qx 'sample.swift'
-printf '%s' "$SEARCH_RESULT" | plutil -extract result.structuredContent.matches.0.line raw -expect integer -o - - | grep -qx '4'
+SEARCH_RESULT="$(tool_call 33 grep '{"pattern":"needle-target","fixed_strings":true,"output_mode":"content","context":1}')"
+printf '%s' "$SEARCH_RESULT" | extract matches.0.path raw | grep -qx 'sample.swift'
+printf '%s' "$SEARCH_RESULT" | extract matches.0.line raw | grep -qx '4'
+printf '%s' "$SEARCH_RESULT" | extract matches.0.before.0.text raw | grep -qx 'func alpha() {'
+printf '%s' "$SEARCH_RESULT" | extract truncation_reasons raw | grep -qx '0'
 
-CRLF_SEARCH="$(curl -fsS -X POST "$BASE_URL" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":332,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"needle-crlf","path":"","context_lines":1,"max_results":10}}}')"
-printf '%s' "$CRLF_SEARCH" | grep -q 'crlf.txt'
-printf '%s' "$CRLF_SEARCH" | sed 's/\\"/"/g' | grep -q '"line" : 3'
-printf '%s' "$CRLF_SEARCH" | sed 's/\\"/"/g' | grep -q '"preview_start_line" : 2'
+CRLF_SEARCH="$(tool_call 332 grep '{"pattern":"needle-crlf","output_mode":"content","context":1}')"
+printf '%s' "$CRLF_SEARCH" | extract matches.0.path raw | grep -qx 'crlf.txt'
+printf '%s' "$CRLF_SEARCH" | extract matches.0.line raw | grep -qx '3'
+printf '%s' "$CRLF_SEARCH" | extract matches.0.text raw | grep -qx 'needle-crlf'
+printf '%s' "$CRLF_SEARCH" | extract matches.0.before.0.line raw | grep -qx '2'
 
 CRLF_RANGE="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -770,11 +1292,9 @@ RANGE_FRACTIONAL_START="$(curl -fsS -X POST "$BASE_URL" \
 printf '%s' "$RANGE_FRACTIONAL_START" | grep -q '"isError":true'
 printf '%s' "$RANGE_FRACTIONAL_START" | grep -q 'Missing or invalid argument: start_line'
 
-BINARY_SCAN="$(curl -fsS -X POST "$BASE_URL" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":335,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"not-present","path":"binary-only","context_lines":1,"max_results":10}}}')"
-printf '%s' "$BINARY_SCAN" | sed 's/\\"/"/g' | grep -q '"bytes_scanned" : 1024'
-printf '%s' "$BINARY_SCAN" | sed 's/\\"/"/g' | grep -q '"files_scanned" : 0'
+BINARY_SCAN="$(tool_call 335 grep '{"pattern":"A","path":"binary-only"}')"
+printf '%s' "$BINARY_SCAN" | extract total raw | grep -qx '0'
+printf '%s' "$BINARY_SCAN" | extract default_excluded_directory_names json | grep -q 'node_modules'
 
 EOF_RANGE="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -783,14 +1303,6 @@ printf '%s' "$EOF_RANGE" | sed 's/\\"/"/g' | grep -q '"total_lines" : 2'
 printf '%s' "$EOF_RANGE" | grep -q 'has_after.*false'
 printf '%s' "$EOF_RANGE" | grep -q 'truncated.*false'
 printf '%s' "$EOF_RANGE" | grep -q 'second'
-
-SEARCH_ESCAPE="$(curl -fsS -X POST "$BASE_URL" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":331,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"must stay private","path":"","context_lines":1,"max_results":10}}}')"
-if printf '%s' "$SEARCH_ESCAPE" | grep -q 'secret.txt'; then
-    echo "search_content escaped through symlink" >&2
-    exit 1
-fi
 
 RANGE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -802,6 +1314,56 @@ printf '%s' "$RANGE_RESULT" | grep -q 'needle-target'
 printf '%s' "$RANGE_RESULT" | grep -q 'func beta'
 printf '%s' "$RANGE_RESULT" | plutil -extract result.structuredContent.start_line raw -expect integer -o - - | grep -qx '3'
 printf '%s' "$RANGE_RESULT" | plutil -extract result.structuredContent.end_line raw -expect integer -o - - | grep -qx '7'
+
+
+BATCH_READ_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":342,"method":"tools/call","params":{"name":"batch_read","arguments":{"operations":[{"tool":"read_file","arguments":{"relative_path":"hello.txt"}},{"tool":"read_file_range","arguments":{"relative_path":"sample.swift","start_line":3,"end_line":5}},{"tool":"glob","arguments":{"pattern":"scoped-target*","path":"scope-a"}},{"tool":"search_code","arguments":{"queries":["TypedTarget"],"path":"ranked-search","max_results_per_query":1}},{"tool":"repo_overview","arguments":{"path":"overview-project"}}]}}}')"
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.requested raw -expect integer -o - - | grep -qx '5'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.completed raw -expect integer -o - - | grep -qx '5'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.succeeded raw -expect integer -o - - | grep -qx '5'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.failed raw -expect integer -o - - | grep -qx '0'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.results.0.structured_content.result raw -expect string -o - - | grep -qx 'hello swift'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.results.2.structured_content.files.0 raw -expect string -o - - | grep -qx 'scope-a/scoped-target.txt'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.results.3.structured_content.query_results.0.matches.0.line raw -expect integer -o - - | grep -qx '3'
+printf '%s' "$BATCH_READ_RESULT" | plutil -extract result.structuredContent.results.4.structured_content.manifests json -o - - | grep -q 'package.json'
+
+BATCH_READ_REJECT_WRITE="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":343,"method":"tools/call","params":{"name":"batch_read","arguments":{"stop_on_error":true,"operations":[{"tool":"write_file","arguments":{"relative_path":"should-not-exist.txt","content":"no"}},{"tool":"read_file","arguments":{"relative_path":"hello.txt"}}]}}}')"
+printf '%s' "$BATCH_READ_REJECT_WRITE" | plutil -extract result.structuredContent.completed raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$BATCH_READ_REJECT_WRITE" | plutil -extract result.structuredContent.succeeded raw -expect integer -o - - | grep -qx '0'
+printf '%s' "$BATCH_READ_REJECT_WRITE" | plutil -extract result.structuredContent.failed raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$BATCH_READ_REJECT_WRITE" | plutil -extract result.structuredContent.stopped_on_error raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$BATCH_READ_REJECT_WRITE" | plutil -extract result.structuredContent.results.0.ok raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$BATCH_READ_REJECT_WRITE" | grep -q 'batch_read does not allow tool: write_file'
+[ ! -e "$SERVER_ROOT/should-not-exist.txt" ]
+
+
+BATCH_READ_CONTINUE_AFTER_ERROR="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":344,"method":"tools/call","params":{"name":"batch_read","arguments":{"operations":[{"tool":"write_file","arguments":{"relative_path":"still-should-not-exist.txt","content":"no"}},{"tool":"read_file","arguments":{"relative_path":"hello.txt"}}]}}}')"
+printf '%s' "$BATCH_READ_CONTINUE_AFTER_ERROR" | plutil -extract result.structuredContent.completed raw -expect integer -o - - | grep -qx '2'
+printf '%s' "$BATCH_READ_CONTINUE_AFTER_ERROR" | plutil -extract result.structuredContent.succeeded raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$BATCH_READ_CONTINUE_AFTER_ERROR" | plutil -extract result.structuredContent.failed raw -expect integer -o - - | grep -qx '1'
+printf '%s' "$BATCH_READ_CONTINUE_AFTER_ERROR" | plutil -extract result.structuredContent.stopped_on_error raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$BATCH_READ_CONTINUE_AFTER_ERROR" | plutil -extract result.structuredContent.results.1.structured_content.result raw -expect string -o - - | grep -qx 'hello swift'
+[ ! -e "$SERVER_ROOT/still-should-not-exist.txt" ]
+
+BATCH_OPERATION='{"tool":"read_file","arguments":{"relative_path":"hello.txt"}}'
+BATCH_MAX_OPS=""
+for index in $(seq 1 16); do
+    if [ -n "$BATCH_MAX_OPS" ]; then BATCH_MAX_OPS="$BATCH_MAX_OPS,$BATCH_OPERATION"; else BATCH_MAX_OPS="$BATCH_OPERATION"; fi
+done
+BATCH_MAX_RESULT="$(curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":345,\"method\":\"tools/call\",\"params\":{\"name\":\"batch_read\",\"arguments\":{\"operations\":[$BATCH_MAX_OPS]}}}")"
+printf '%s' "$BATCH_MAX_RESULT" | plutil -extract result.structuredContent.requested raw -expect integer -o - - | grep -qx '16'
+printf '%s' "$BATCH_MAX_RESULT" | plutil -extract result.structuredContent.succeeded raw -expect integer -o - - | grep -qx '16'
+BATCH_TOO_MANY_RESULT="$(curl -fsS -X POST "$BASE_URL" -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":346,\"method\":\"tools/call\",\"params\":{\"name\":\"batch_read\",\"arguments\":{\"operations\":[$BATCH_MAX_OPS,$BATCH_OPERATION]}}}")"
+printf '%s' "$BATCH_TOO_MANY_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$BATCH_TOO_MANY_RESULT" | grep -q 'at most 16'
 
 RANGE_LIMIT_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -826,6 +1388,12 @@ LONG_LINE_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -d '{"jsonrpc":"2.0","id":338,"method":"tools/call","params":{"name":"read_file_range","arguments":{"relative_path":"long-line.txt","start_line":1,"end_line":1}}}')"
 printf '%s' "$LONG_LINE_RESULT" | grep -q '"isError":true'
 printf '%s' "$LONG_LINE_RESULT" | grep -q '80,000 character response limit'
+
+LONG_READ_RESULT="$(curl -fsS -X POST "$BASE_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":339,"method":"tools/call","params":{"name":"read_file","arguments":{"relative_path":"long-line.txt"}}}')"
+printf '%s' "$LONG_READ_RESULT" | plutil -extract result.isError raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$LONG_READ_RESULT" | plutil -extract result.structuredContent.result raw -expect string -o - - | grep -q '\[\.\.\.truncated\.\.\.\]'
 
 LINE_LIMIT_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -1232,7 +1800,7 @@ printf '%s' "$COMMAND_RESULT" | plutil -extract result.structuredContent.result 
 LARGE_COMMAND_RESULT="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"yes x | head -c 120000","timeout_seconds":5}}}')"
-printf '%s' "$LARGE_COMMAND_RESULT" | grep -q 'truncated 20000 bytes'
+grep -q 'truncated 20000 bytes' <<<"$LARGE_COMMAND_RESULT"
 
 echo "mcp-legacy-smoke: ok"
 
@@ -1247,6 +1815,8 @@ printf '%s' "$DISCOVER" | grep -q '"supportedVersions":\["2026-07-28"\]'
 printf '%s' "$DISCOVER" | grep -q '"resultType":"complete"'
 printf '%s' "$DISCOVER" | grep -q '"name":"filemcp"'
 printf '%s' "$DISCOVER" | grep -q 'io.modelcontextprotocol\\/serverInfo'
+printf '%s' "$DISCOVER" | grep -q 'search_code'
+printf '%s' "$DISCOVER" | grep -q 'repo_overview'
 
 TOOLS="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -1257,15 +1827,25 @@ printf '%s' "$TOOLS" | grep -q '"resultType":"complete"'
 printf '%s' "$TOOLS" | grep -q '"cacheScope":"private"'
 printf '%s' "$TOOLS" | grep -q '"name":"read_file"'
 printf '%s' "$TOOLS" | grep -q '"name":"read_file_range"'
-printf '%s' "$TOOLS" | grep -q '"name":"search_content"'
+printf '%s' "$TOOLS" | plutil -extract result.tools.3.name raw -expect string -o - - | grep -qx 'grep'
+printf '%s' "$TOOLS" | plutil -extract result.tools.6.name raw -expect string -o - - | grep -qx 'glob'
+printf '%s' "$TOOLS" | plutil -extract result.tools.3.inputSchema.properties.output_mode.enum json -o - - | grep -q 'files_with_matches'
 printf '%s' "$TOOLS" | grep -q '"outputSchema"'
 printf '%s' "$TOOLS" | plutil -extract result.tools.0.outputSchema.properties.result.type raw -expect string -o - - | grep -qx 'array'
 printf '%s' "$TOOLS" | plutil -extract result.tools.1.outputSchema.properties.result.type raw -expect string -o - - | grep -qx 'string'
 printf '%s' "$TOOLS" | plutil -extract result.tools.2.outputSchema.properties.content.type raw -expect string -o - - | grep -qx 'string'
+printf '%s' "$TOOLS" | plutil -extract result.tools.4.name raw -expect string -o - - | grep -qx 'search_code'
+printf '%s' "$TOOLS" | plutil -extract result.tools.4.outputSchema.properties.query_results.type raw -expect string -o - - | grep -qx 'array'
+printf '%s' "$TOOLS" | plutil -extract result.tools.5.name raw -expect string -o - - | grep -qx 'repo_overview'
+printf '%s' "$TOOLS" | plutil -extract result.tools.5.outputSchema.properties.manifests.type raw -expect string -o - - | grep -qx 'array'
 printf '%s' "$TOOLS" | plutil -extract result.tools.0.annotations.openWorldHint raw -expect bool -o - - | grep -qx 'false'
-printf '%s' "$TOOLS" | plutil -extract result.tools.5.annotations.destructiveHint raw -expect bool -o - - | grep -qx 'true'
-printf '%s' "$TOOLS" | plutil -extract result.tools.14.annotations.openWorldHint raw -expect bool -o - - | grep -qx 'true'
-printf '%s' "$TOOLS" | plutil -extract result.tools.15.annotations.openWorldHint raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$TOOLS" | plutil -extract result.tools.7.annotations.destructiveHint raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$TOOLS" | plutil -extract result.tools.16.annotations.openWorldHint raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$TOOLS" | plutil -extract result.tools.17.name raw -expect string -o - - | grep -qx 'save_conversation_to_codex'
+printf '%s' "$TOOLS" | plutil -extract result.tools.17.annotations.openWorldHint raw -expect bool -o - - | grep -qx 'false'
+printf '%s' "$TOOLS" | plutil -extract result.tools.18.annotations.openWorldHint raw -expect bool -o - - | grep -qx 'true'
+printf '%s' "$TOOLS" | plutil -extract result.tools.19.name raw -expect string -o - - | grep -qx 'batch_read'
+printf '%s' "$TOOLS" | plutil -extract result.tools.19.annotations.readOnlyHint raw -expect bool -o - - | grep -qx 'true'
 
 MODERN_CALL="$(curl -fsS -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -1387,5 +1967,124 @@ ALLOWED_ORIGIN="$(curl -fsS -X POST "$BASE_URL" \
 printf '%s' "$ALLOWED_ORIGIN" | grep -q '"resultType":"complete"'
 
 echo "mcp-modern-2026-07-28: ok"
+
+if [ "$MCP_EXTENDED_SEARCH_TESTS" = "1" ]; then
+    python3 - "$SERVER_ROOT" <<'PYEXT'
+import os
+import sys
+root = sys.argv[1]
+
+def mkdir(name):
+    path = os.path.join(root, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+preview = mkdir("preview-limit")
+with open(os.path.join(preview, "preview.txt"), "w", encoding="utf-8") as handle:
+    for index in range(100):
+        handle.write(f"preview-target-{index:03d} " + ("x" * 970) + "\n")
+
+oversized = mkdir("oversized-file")
+with open(os.path.join(oversized, "too-large.txt"), "wb") as handle:
+    handle.write(b"OversizedTarget\n" + b"x" * 1_000_000)
+
+byte_limit = mkdir("byte-limit")
+payload = b"ByteLimitTarget\n" + b"x" * 989_000
+for index in range(51):
+    with open(os.path.join(byte_limit, f"chunk-{index:02d}.txt"), "wb") as handle:
+        handle.write(payload)
+
+file_limit = mkdir("code-file-limit")
+for index in range(2_001):
+    with open(os.path.join(file_limit, f"file-{index:04d}.txt"), "w", encoding="utf-8") as handle:
+        handle.write("FileLimitTarget\n")
+
+output_limit = mkdir("output-limit")
+with open(os.path.join(output_limit, "lines.txt"), "w", encoding="utf-8") as handle:
+    handle.write("y\n" * 450_000)
+
+overview_limits = mkdir("overview-limits")
+for index in range(101):
+    manifest_dir = os.path.join(overview_limits, f"manifest-{index:03d}")
+    os.makedirs(manifest_dir, exist_ok=True)
+    open(os.path.join(manifest_dir, "package.json"), "wb").close()
+for index in range(21):
+    open(os.path.join(overview_limits, f"type-{index:02d}.ext{index:02d}"), "wb").close()
+for index in range(1001):
+    open(os.path.join(overview_limits, f"top-{index:04d}.txt"), "wb").close()
+
+unreadable = mkdir("unreadable-file")
+unreadable_file = os.path.join(unreadable, "secret.txt")
+with open(unreadable_file, "w", encoding="utf-8") as handle:
+    handle.write("unreadable-target\n")
+os.chmod(unreadable_file, 0)
+
+enumeration = mkdir("enumeration-error")
+locked = os.path.join(enumeration, "locked")
+os.makedirs(locked, exist_ok=True)
+with open(os.path.join(locked, "hidden.txt"), "w", encoding="utf-8") as handle:
+    handle.write("enumeration-hidden\n")
+os.chmod(locked, 0)
+PYEXT
+
+    PREVIEW_LIMIT_RESULT="$(tool_call 5001 grep '{"pattern":"preview-target","path":"preview-limit","output_mode":"content","context":10}')"
+    printf '%s' "$PREVIEW_LIMIT_RESULT" | extract truncated raw | grep -qx 'true'
+    printf '%s' "$PREVIEW_LIMIT_RESULT" | extract truncation_reasons json | grep -q 'preview_limit'
+    printf '%s' "$PREVIEW_LIMIT_RESULT" | extract next_offset raw | grep -Eq '^[1-9][0-9]*$'
+
+    OVERSIZED_FILE_RESULT="$(tool_call 5002 search_code '{"queries":["OversizedTarget"],"path":"oversized-file","max_results_per_query":1}')"
+    printf '%s' "$OVERSIZED_FILE_RESULT" | extract files_matched raw | grep -qx '0'
+    printf '%s' "$OVERSIZED_FILE_RESULT" | extract query_results.0.observed_matching_lines raw | grep -qx '0'
+    OVERSIZED_GLOB_RESULT="$(tool_call 5013 glob '{"pattern":"*.txt","path":"oversized-file"}')"
+    printf '%s' "$OVERSIZED_GLOB_RESULT" | extract files.0 raw | grep -qx 'oversized-file/too-large.txt'
+    OVERSIZED_OVERVIEW_RESULT="$(tool_call 5014 repo_overview '{"path":"oversized-file"}')"
+    printf '%s' "$OVERSIZED_OVERVIEW_RESULT" | extract files_seen raw | grep -qx '1'
+
+    BYTE_LIMIT_RESULT="$(tool_call 5003 search_code '{"queries":["ByteLimitTarget"],"path":"byte-limit","max_results_per_query":1}')"
+    printf '%s' "$BYTE_LIMIT_RESULT" | extract truncated raw | grep -qx 'true'
+    printf '%s' "$BYTE_LIMIT_RESULT" | extract truncation_reasons json | grep -q 'byte_limit'
+    printf '%s' "$BYTE_LIMIT_RESULT" | extract files_ranked raw | grep -qx '50'
+
+    FILE_LIMIT_RESULT="$(tool_call 5004 search_code '{"queries":["FileLimitTarget"],"path":"code-file-limit","max_results_per_query":1}')"
+    printf '%s' "$FILE_LIMIT_RESULT" | extract truncation_reasons json | grep -q 'file_limit'
+    printf '%s' "$FILE_LIMIT_RESULT" | extract files_matched raw | grep -qx '2001'
+    printf '%s' "$FILE_LIMIT_RESULT" | extract files_ranked raw | grep -qx '2000'
+
+    OUTPUT_LIMIT_RESULT="$(tool_call 5009 grep '{"pattern":"y","path":"output-limit","output_mode":"content","head_limit":1}')"
+    printf '%s' "$OUTPUT_LIMIT_RESULT" | plutil -extract result.isError raw -o - - | grep -qx 'false'
+    printf '%s' "$OUTPUT_LIMIT_RESULT" | extract truncation_reasons json | grep -q 'output_limit'
+    printf '%s' "$OUTPUT_LIMIT_RESULT" | extract returned raw | grep -qx '1'
+
+    OVERVIEW_LIMIT_RESULT="$(tool_call 5012 repo_overview '{"path":"overview-limits"}')"
+    printf '%s' "$OVERVIEW_LIMIT_RESULT" | extract manifests raw | grep -qx '100'
+    printf '%s' "$OVERVIEW_LIMIT_RESULT" | extract manifest_results_limited raw | grep -qx 'true'
+    printf '%s' "$OVERVIEW_LIMIT_RESULT" | extract file_extensions raw | grep -qx '20'
+    printf '%s' "$OVERVIEW_LIMIT_RESULT" | extract extension_counts_limited raw | grep -qx 'true'
+    printf '%s' "$OVERVIEW_LIMIT_RESULT" | extract top_level_entries raw | grep -qx '1000'
+    printf '%s' "$OVERVIEW_LIMIT_RESULT" | extract top_level_truncated raw | grep -qx 'true'
+
+    UNREADABLE_RESULT="$(tool_call 5005 search_code '{"queries":["unreadable-target"],"path":"unreadable-file","max_results_per_query":1}')"
+    printf '%s' "$UNREADABLE_RESULT" | plutil -extract result.isError raw -o - - | grep -qx 'false'
+    printf '%s' "$UNREADABLE_RESULT" | extract search_errors raw | grep -qx '1'
+    printf '%s' "$UNREADABLE_RESULT" | extract truncation_reasons json | grep -q 'search_error'
+    printf '%s' "$UNREADABLE_RESULT" | extract query_results.0.observed_matching_lines raw | grep -qx '0'
+
+    ENUMERATION_RESULT="$(tool_call 5006 search_code '{"queries":["enumeration-hidden"],"path":"enumeration-error","max_results_per_query":1}')"
+    printf '%s' "$ENUMERATION_RESULT" | extract truncated raw | grep -qx 'true'
+    printf '%s' "$ENUMERATION_RESULT" | extract search_errors raw | grep -Eq '^[1-9][0-9]*$'
+
+    ENUMERATION_GLOB_RESULT="$(tool_call 5007 glob '{"pattern":"*","path":"enumeration-error"}')"
+    printf '%s' "$ENUMERATION_GLOB_RESULT" | extract truncated raw | grep -qx 'true'
+
+    ENUMERATION_OVERVIEW_RESULT="$(tool_call 5008 repo_overview '{"path":"enumeration-error"}')"
+    printf '%s' "$ENUMERATION_OVERVIEW_RESULT" | extract truncated raw | grep -qx 'true'
+    printf '%s' "$ENUMERATION_OVERVIEW_RESULT" | extract search_errors raw | grep -Eq '^[1-9][0-9]*$'
+
+    chmod 700 "$SERVER_ROOT/enumeration-error/locked"
+    chmod 600 "$SERVER_ROOT/unreadable-file/secret.txt"
+    echo "extended-search-limits: ok"
+fi
+
+python3 tests/check_agent_tools_http.py
 
 stop_server

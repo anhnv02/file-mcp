@@ -16,6 +16,10 @@ $TunnelClient = Join-Path $Root "vendor/tunnel-client/windows-amd64/tunnel-clien
 if (-not (Test-Path -LiteralPath $TunnelClient -PathType Leaf)) {
     throw "Missing vendored Windows tunnel-client: $TunnelClient"
 }
+$Ripgrep = Join-Path $Root "vendor/ripgrep/windows-amd64/rg.exe"
+if (-not (Test-Path -LiteralPath $Ripgrep -PathType Leaf)) {
+    throw "Missing vendored Windows ripgrep: $Ripgrep"
+}
 
 $ProfileRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("filemcp-windows-tunnel-profile-" + [Guid]::NewGuid().ToString("N"))
 $ProfileName = "local-auth-profile"
@@ -56,5 +60,6 @@ finally {
     Remove-Item -LiteralPath $ProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$env:FILEMCP_RG = $Ripgrep
 dotnet run --project "windows/tests/FileMCP.Core.Tests/FileMCP.Core.Tests.csproj" -c Release
 if ($LASTEXITCODE -ne 0) { throw "Windows integration tests failed." }

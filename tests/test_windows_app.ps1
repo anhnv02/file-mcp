@@ -33,6 +33,14 @@ if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $TunnelClient -PathType Leaf)) {
     throw "tunnel-client.exe is missing from the Windows x64 release archive."
 }
+$Ripgrep = Join-Path $SmokeRoot "rg.exe"
+if (-not (Test-Path -LiteralPath $Ripgrep -PathType Leaf)) {
+    throw "rg.exe is missing from the Windows x64 release archive."
+}
+$RipgrepVersion = & $Ripgrep --version
+if ($LASTEXITCODE -ne 0 -or ($RipgrepVersion | Select-Object -First 1) -notmatch '^ripgrep 15\.2\.0 ') {
+    throw "Unexpected packaged ripgrep version: $RipgrepVersion"
+}
 $TunnelVersion = & $TunnelClient --version
 if ($LASTEXITCODE -ne 0 -or $TunnelVersion -notmatch '^0\.0\.12\+881c9a8fed7cccbe6607cd419863bbca506b8215 ') {
     throw "Unexpected packaged tunnel-client version: $TunnelVersion"

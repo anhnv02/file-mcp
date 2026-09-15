@@ -21,14 +21,19 @@ case "$ARCH" in
 esac
 
 TUNNEL_BIN="$ROOT/vendor/tunnel-client/$TARGET_TAG/tunnel-client"
-if [ ! -f "$TUNNEL_BIN" ]; then
-    echo "ERROR: missing tunnel-client for $TARGET_TAG: $TUNNEL_BIN" >&2
-    exit 1
-fi
+RG_BIN="$ROOT/vendor/ripgrep/$TARGET_TAG/rg"
+for required_binary in "$TUNNEL_BIN" "$RG_BIN"; do
+    if [ ! -f "$required_binary" ]; then
+        echo "ERROR: missing bundled executable for $TARGET_TAG: $required_binary" >&2
+        exit 1
+    fi
+done
 
 mkdir -p "$BUILD_DIR"
 cp "$TUNNEL_BIN" "$BUILD_DIR/tunnel-client"
 chmod 755 "$BUILD_DIR/tunnel-client"
+cp "$RG_BIN" "$BUILD_DIR/rg"
+chmod 755 "$BUILD_DIR/rg"
 
 echo "Compiling full Swift macOS app ..."
 "$SWIFTC" \
@@ -39,7 +44,9 @@ echo "Compiling full Swift macOS app ..."
     -framework Security \
     -o "$UI_BIN" \
     "$ROOT/macos/ProcessRunner.swift" \
+    "$ROOT/macos/Ripgrep.swift" \
     "$ROOT/macos/LocalMCPServer.swift" \
+    "$ROOT/macos/CodexHistory.swift" \
     "$ROOT/macos/LocalMCPRuntime.swift" \
     "$ROOT/macos/FileMCPApp.swift" \
     "$ROOT/macos/main.swift"
@@ -47,5 +54,6 @@ echo "Compiling full Swift macOS app ..."
 echo "Starting FileMCP dev app"
 echo "  Swift binary:  $UI_BIN"
 echo "  tunnel-client: $BUILD_DIR/tunnel-client"
+echo "  ripgrep:       $BUILD_DIR/rg"
 echo
 exec "$UI_BIN"
