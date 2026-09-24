@@ -47,6 +47,7 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
     private LocalMcpServer? _server;
     private ManagedProcess? _tunnelProcess;
     private ProfileLock? _profileLock;
+    private readonly SystemSleepGuard _sleepGuard = new();
     private bool _requestedStop;
 
     public LocalMcpRuntime(string? profileDirectory = null) => _profileDirectoryOverride = profileDirectory;
@@ -221,7 +222,15 @@ public sealed class LocalMcpRuntime : IAsyncDisposable
 
     private static string Redact(string text, IReadOnlyList<string> sensitive) { foreach (var secret in sensitive.Where(s => s.Length > 0)) text = text.Replace(secret, "[REDACTED]", StringComparison.Ordinal); return text; }
     private void EmitLog(string text) => Log?.Invoke(text);
-    private void SetState(LocalMcpRuntimeState state) { lock (_stateGate) _state = state; StateChanged?.Invoke(state); }
+    private void SetState(LocalMcpRuntimeState state)
+    {
+        lock (_stateGate)
+        {
+            _state = state;
+            if (state.Status == LocalMcpRuntimeStatus.Running) _sleepGuard.Acquire(); else _sleepGuard.Release();
+        }
+        StateChanged?.Invoke(state);
+    }
 
-    public async ValueTask DisposeAsync() { await ShutdownAsync().ConfigureAwait(false); _serial.Dispose(); _startupCts?.Dispose(); }
+    public async ValueTask DisposeAsync() { await ShutdownAsync().ConfigureAwait(false); _sleepGuard.Dispose(); _serial.Dispose(); _startupCts?.Dispose(); }
 }

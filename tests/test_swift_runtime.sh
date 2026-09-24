@@ -245,6 +245,20 @@ func isFailed(_ state: LocalMCPRuntimeState) -> Bool {
     return false
 }
 
+func holdsIdleSleepAssertion() -> Bool {
+    let process = Process()
+    let pipe = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+    process.arguments = ["-g", "assertions"]
+    process.standardOutput = pipe
+    try! process.run()
+    let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    process.waitUntilExit()
+    return output.split(whereSeparator: { $0.isNewline }).contains { line in
+        line.contains("pid \(getpid())(") && line.contains("PreventUserIdleSystemSleep")
+    }
+}
+
 let root = FileManager.default.temporaryDirectory.appendingPathComponent("filemcp-runtime-test-\(UUID().uuidString)")
 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: root) }
@@ -278,6 +292,7 @@ let secondConfig = LocalMCPConfiguration(
 
 first.start(firstConfig)
 waitFor({ first.state == .running }, timeout: 5, label: "first runtime")
+waitFor({ holdsIdleSleepAssertion() }, timeout: 2, label: "idle sleep assertion while running")
 let authLines = try String(contentsOf: authCapture, encoding: .utf8)
     .split(whereSeparator: { $0.isNewline })
     .map(String.init)
@@ -297,6 +312,7 @@ second.start(secondConfig)
 waitFor({ isFailed(second.state) }, timeout: 5, label: "profile lock failure")
 first.stop()
 waitFor({ first.state == .stopped }, timeout: 5, label: "first stop")
+waitFor({ !holdsIdleSleepAssertion() }, timeout: 2, label: "idle sleep assertion released after stop")
 second.start(secondConfig)
 waitFor({ second.state == .running }, timeout: 5, label: "second recovery")
 second.stop()
@@ -305,6 +321,7 @@ first.start(firstConfig)
 waitFor({ first.state == .running }, timeout: 5, label: "first restart")
 first.shutdownImmediately()
 waitFor({ first.state == .stopped }, timeout: 5, label: "shutdown")
+waitFor({ !holdsIdleSleepAssertion() }, timeout: 2, label: "idle sleep assertion released after shutdown")
 print("runtime-lifecycle-profile-lock: ok")
 
 let invalidHealthRuntime = LocalMCPRuntime(profileDirectory: profileDirectory)

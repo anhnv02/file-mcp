@@ -95,6 +95,7 @@ final class LocalMCPRuntime {
     private var server: LocalMCPServer?
     private var tunnelProcess: ManagedProcess?
     private var profileLock: ProfileLock?
+    private var sleepActivity: NSObjectProtocol?
     private var requestedStop = false
     private let profileDirectoryOverride: URL?
 
@@ -555,9 +556,26 @@ final class LocalMCPRuntime {
     private func setState(_ state: LocalMCPRuntimeState) {
         stateLock.lock()
         _state = state
+        updateSleepActivity(for: state)
         stateLock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.onStateChange?(state)
+        }
+    }
+
+    // The tunnel polls the control plane, so idle system sleep (e.g. a locked screen)
+    // takes it offline. Keep the system awake while connected; the display may still sleep.
+    // Caller must hold stateLock.
+    private func updateSleepActivity(for state: LocalMCPRuntimeState) {
+        if state == .running {
+            guard sleepActivity == nil else { return }
+            sleepActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.idleSystemSleepDisabled, .userInitiated],
+                reason: "FileMCP tunnel is connected"
+            )
+        } else if let activity = sleepActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            sleepActivity = nil
         }
     }
 
