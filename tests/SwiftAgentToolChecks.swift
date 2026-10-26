@@ -3,8 +3,8 @@ func runAgentToolChecks(rootPath: String) throws {
     func check(_ condition: Bool, line: Int = #line) { precondition(condition, "Failed at fixture line \(line)") }
     let root = URL(fileURLWithPath: rootPath)
     let resolver = try SafePathResolver(rootPath: rootPath)
-    let safe = LocalTools(resolver: resolver, gitUserName: "Test", gitUserEmail: "test@example.invalid", enableCommands: false)
-    let full = LocalTools(resolver: resolver, gitUserName: "Test", gitUserEmail: "test@example.invalid", enableCommands: true)
+    let safe = LocalTools(resolver: resolver, gitUserName: "Test", gitUserEmail: "test@example.invalid", enableCommands: false, enableGitPush: true, enableCodexHistory: true)
+    let full = LocalTools(resolver: resolver, gitUserName: "Test", gitUserEmail: "test@example.invalid", enableCommands: true, enableGitPush: true, enableCodexHistory: true)
     defer { full.stopCommandSessions() }
     func call(_ tools: LocalTools, _ name: String, _ args: [String: Any] = [:]) throws -> [String: Any] {
         let result = try tools.call(name: name, arguments: args).structuredContent
@@ -28,6 +28,10 @@ func runAgentToolChecks(rootPath: String) throws {
         }
         fatalError("Session did not finish")
     }
+    let restricted = LocalTools(resolver: resolver, gitUserName: "Test", gitUserEmail: "test@example.invalid", enableCommands: false)
+    check(!restricted.hasTool(named: "git_push") && !restricted.hasTool(named: "save_conversation_to_codex"))
+    rejects("disabled Git push") { _ = try call(restricted, "git_push") }
+    rejects("disabled Codex history") { _ = try call(restricted, "save_conversation_to_codex", ["title": "disabled", "messages": [["role": "user", "content": "test"]]]) }
     check(safe.toolDefinitions.count == 22 && full.toolDefinitions.count == 26)
     check(safe.hasTool(named: "apply_patch") && !safe.hasTool(named: "start_command") && !safe.hasTool(named: "read_command_output"))
     rejects("disabled commands") { _ = try call(safe, "start_command", ["request_id": "disabled", "command": "true"]) }
@@ -149,5 +153,23 @@ func runAgentToolChecks(rootPath: String) throws {
     let stoppedPID = Int32(try String(contentsOf: root.appendingPathComponent("shutdown.pid"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines))!
     check(kill(stoppedPID, 0) == -1 && errno == ESRCH)
     rejects("start after shutdown") { _ = try call(full, "start_command", ["request_id": "late", "command": "true"]) }
+    let synchronous = LocalTools(resolver: resolver, gitUserName: "Test", gitUserEmail: "test@example.invalid", enableCommands: true)
+    let synchronousDone = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        defer { synchronousDone.signal() }
+        do {
+            _ = try synchronous.call(name: "run_command", arguments: ["command": "sleep 30 & echo $! > sync-shutdown.pid; wait", "timeout_seconds": 60])
+            preconditionFailure("stopped synchronous command must not report success")
+        } catch { }
+    }
+    let synchronousPID = root.appendingPathComponent("sync-shutdown.pid")
+    let synchronousDeadline = Date().addingTimeInterval(3)
+    while !FileManager.default.fileExists(atPath: synchronousPID.path) && Date() < synchronousDeadline { Thread.sleep(forTimeInterval: 0.02) }
+    check(FileManager.default.fileExists(atPath: synchronousPID.path))
+    synchronous.stopCommandSessions()
+    check(synchronousDone.wait(timeout: .now() + 3) == .success)
+    let childPID = Int32(try String(contentsOf: synchronousPID, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines))!
+    check(kill(childPID, 0) == -1 && errno == ESRCH)
+    print("PASS: synchronous command cancellation and descendant cleanup on disconnect")
     print("PASS: command streaming/cursors/exit status/retries/bounds/cancel/timeout/descendant cleanup/shutdown")
 }

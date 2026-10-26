@@ -4,11 +4,25 @@ dist/
 **/bin/
 **/obj/
 
+# Local Python tooling/cache
+.venv/
+__pycache__/
+*.pyc
+
 # Local secrets and legacy credential stores.
 .env
 .env.*
 !.env.example
 .oauth_store.json
+.cloudflared/
+*.pem
+*.key
+*.p12
+*.pfx
+.gitleaks-report.*
 
 # macOS
 .DS_Store
+
+# Local workspace mounts / adjacent repositories
+shared/

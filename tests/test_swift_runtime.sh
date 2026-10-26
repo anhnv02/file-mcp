@@ -84,6 +84,41 @@ cat >"$TMP_DIR/main.swift" <<'SWIFT'
 import Foundation
 import Darwin
 
+// Exercise every read boundary, repeated values, Unicode and an incomplete tail.
+let redactionSecret = "secret-🔒-abcdef"
+let redactionInput = "before \(redactionSecret) between \(redactionSecret) after"
+for boundary in redactionInput.indices {
+    let redactor = StreamingSecretRedactor(secrets: [redactionSecret])
+    let output = redactor.append(String(redactionInput[..<boundary]))
+        + redactor.append(String(redactionInput[boundary...]), final: true)
+    precondition(output == "before [REDACTED] between [REDACTED] after")
+}
+let tailRedactor = StreamingSecretRedactor(secrets: [redactionSecret])
+precondition(tailRedactor.append("safe secret-") == "safe ")
+precondition(tailRedactor.append("", final: true) == "secret-")
+let streamLock = NSLock()
+let streamsDone = DispatchSemaphore(value: 0)
+var safeStreamOutput = ""
+let streamProcess = try ProcessRunner.startManaged(
+    executable: "/bin/sh",
+    arguments: ["-c", "printf 'sensitive-'; printf 'sensitive-' >&2; sleep 0.1; printf 'value\\n'; printf 'value\\n' >&2"],
+    sensitiveValues: ["sensitive-value"],
+    onOutput: { text in
+        streamLock.lock()
+        safeStreamOutput += text
+        streamLock.unlock()
+    },
+    onExit: { _ in streamsDone.signal() }
+)
+precondition(streamsDone.wait(timeout: .now() + 3) == .success)
+streamLock.lock()
+let completedStreamOutput = safeStreamOutput
+streamLock.unlock()
+precondition(completedStreamOutput.components(separatedBy: "[REDACTED]").count == 3)
+precondition(!completedStreamOutput.contains("sensitive-") && !completedStreamOutput.contains("value"))
+withExtendedLifetime(streamProcess) {}
+print("streaming-secret-redaction: ok")
+
 func waitForProcessExit(_ pid: pid_t, timeoutSeconds: TimeInterval = 2.0) -> Bool {
     guard pid > 0 else { return true }
     let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -228,6 +263,76 @@ esac
 SH
 chmod +x "$TMP_DIR/tunnel-client"
 
+cat >"$TMP_DIR/cloudflared" <<'SH'
+#!/bin/sh
+[ -z "${CONTROL_PLANE_API_KEY:-}" ] || { echo leaked-openai-api-key >&2; exit 3; }
+[ -z "${FILEMCP_LOCAL_AUTH_TOKEN:-}" ] || { echo leaked-local-auth-token >&2; exit 3; }
+state="${MCP_TEST_CF_STATE:-/nonexistent}"
+case "$1 $2" in
+    "tunnel list")
+        [ "$*" = "tunnel list --output json" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+        echo "WRN version outdated" >&2
+        if [ -n "${MCP_TEST_CF_NAMED:-}" ]; then
+            echo '[{"id":"abcdef01-2345-6789-abcd-ef0123456789","name":"cli-tunnel"}]'
+            exit 0
+        fi
+        if [ -f "$state" ]; then
+            echo '[{"id":"22222222-2222-2222-2222-222222222222","name":"new-tunnel"},{"id":"11111111-1111-1111-1111-111111111111","name":"alpha"}]'
+        else
+            echo '[{"id":"11111111-1111-1111-1111-111111111111","name":"alpha"}]'
+        fi
+        exit 0 ;;
+    "tunnel create")
+        [ "$*" = "tunnel create new-tunnel" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+        touch "$state"; echo "Created tunnel new-tunnel"; exit 0 ;;
+    "tunnel delete")
+        [ "$*" = "tunnel delete -f new-tunnel" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+        rm -f "$state"; echo "Deleted tunnel new-tunnel"; exit 0 ;;
+    "tunnel route")
+        [ "$*" = "tunnel route dns new-tunnel mcp.example.com" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+        echo "Added CNAME mcp.example.com"; exit 0 ;;
+    "tunnel login")
+        [ -n "${TUNNEL_ORIGIN_CERT:-}" ] || { echo missing-origin-cert-env >&2; exit 3; }
+        if [ -f "$TUNNEL_ORIGIN_CERT" ]; then
+            echo "You have an existing certificate at $TUNNEL_ORIGIN_CERT which login would overwrite."; exit 0
+        fi
+        echo test-cert >"$TUNNEL_ORIGIN_CERT"; echo "login-ok"; exit 0 ;;
+    "tunnel run")
+        [ "$*" = "tunnel run --help" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+        [ -n "${MCP_TEST_CF_NO_TOKEN_FILE:-}" ] || echo "   --token-file value   Filepath at which to read the tunnel token."
+        exit 0 ;;
+esac
+if [ "$1 $2 $3 $4" = "tunnel --no-autoupdate run --token-file" ]; then
+    [ -z "${TUNNEL_TOKEN:-}" ] || { echo token-in-environment >&2; exit 3; }
+    [ "$#" = 5 ] || { echo "unexpected-args: $*" >&2; exit 3; }
+    [ "$(stat -f '%Lp' "$5")" = "600" ] || { echo token-file-not-private >&2; exit 3; }
+    echo "cloudflared-run-ok token=$(cat "$5")"
+    sleep "${MCP_TEST_CF_CONNECT_DELAY:-0}"
+    printf 'INF Registered tunnel '
+    sleep 0.05
+    echo 'connection connIndex=0'
+elif [ -n "${TUNNEL_TOKEN:-}" ]; then
+    [ "$*" = "tunnel --no-autoupdate run" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+    [ "$TUNNEL_TOKEN" = "eyJaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ] || { echo bad-tunnel-token >&2; exit 3; }
+    echo "cloudflared-run-ok token=$TUNNEL_TOKEN"
+else
+    [ "$1 $2 $3 $5 $6 $8" = "tunnel --no-autoupdate --config run --credentials-file cli-tunnel" ] || { echo "unexpected-args: $*" >&2; exit 3; }
+    [ "$TUNNEL_ORIGIN_CERT" = "$MCP_TEST_CF_CERT" ] || { echo missing-runtime-cert >&2; exit 3; }
+    [ -r "$7" ] || { echo missing-runtime-credentials >&2; exit 3; }
+    config="$4"
+    [ "$(stat -f '%Lp' "$config")" = "600" ] || { echo config-not-private >&2; exit 3; }
+    grep -q 'hostname: mcp.example.com' "$config" || { echo bad-config-hostname >&2; exit 3; }
+    grep -q 'service: http://127.0.0.1:18092' "$config" || { echo bad-config-service >&2; exit 3; }
+    grep -q 'service: http_status:404' "$config" || { echo bad-config-fallback >&2; exit 3; }
+    echo "cloudflared-config-ok"
+fi
+# Every provider must wait for an actual edge registration, including the legacy-token fallback.
+echo "INF Registered tunnel connection connIndex=1"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+SH
+chmod +x "$TMP_DIR/cloudflared"
+
 cat >"$TMP_DIR/main.swift" <<'SWIFT'
 import Foundation
 
@@ -262,6 +367,16 @@ func holdsIdleSleepAssertion() -> Bool {
 let root = FileManager.default.temporaryDirectory.appendingPathComponent("filemcp-runtime-test-\(UUID().uuidString)")
 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: root) }
+let policyA = root.appendingPathComponent("policy-A", isDirectory: true)
+let policyB = root.appendingPathComponent("policy-B", isDirectory: true)
+let policyLink = root.appendingPathComponent("policy-link")
+try FileManager.default.createDirectory(at: policyA, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: policyB, withIntermediateDirectories: true)
+try FileManager.default.createSymbolicLink(at: policyLink, withDestinationURL: policyA)
+let firstPolicyPath = LocalMCPRuntime.canonicalWorkspacePath(policyLink.path)
+try FileManager.default.removeItem(at: policyLink)
+try FileManager.default.createSymbolicLink(at: policyLink, withDestinationURL: policyB)
+precondition(firstPolicyPath != LocalMCPRuntime.canonicalWorkspacePath(policyLink.path), "OAuth consent must follow the canonical workspace, not a retargeted symlink")
 let profile = "runtime-test-\(UUID().uuidString)"
 let profileDirectory = root.appendingPathComponent("tunnel-profiles", isDirectory: true)
 let authCapture = root.appendingPathComponent("local-auth-headers.txt")
@@ -395,6 +510,174 @@ unsetenv("LOG_HTTP_RAW_UNSAFE")
 precondition(slowRuntime.state == .stopped, "cancelled bootstrap must end stopped")
 precondition(shutdownElapsed < 2.5, "bootstrap shutdown took too long: \(shutdownElapsed)s")
 print("runtime-bootstrap-cancel: ok")
+
+let cloudflareRuntime = LocalMCPRuntime(profileDirectory: profileDirectory)
+var cloudflareLog = ""
+cloudflareRuntime.onLog = { text in
+    logLock.lock()
+    cloudflareLog += text
+    logLock.unlock()
+}
+let cloudflareSecret = String(repeating: "c", count: 64)
+func cloudflareConfig(hostname: String, secret: String = cloudflareSecret, port: UInt16 = 18092) -> LocalMCPConfiguration {
+    LocalMCPConfiguration(
+        provider: .cloudflare, tunnelID: "", apiKey: "",
+        cloudflareToken: "eyJaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cloudflareHostname: hostname, cloudflarePathSecret: secret,
+        profile: "cloudflare", port: port, allowedDirectory: root.path, healthAddress: "",
+        gitUserName: "", gitUserEmail: "", enableCommands: false
+    )
+}
+cloudflareRuntime.start(cloudflareConfig(hostname: "https://mcp.example.com/mcp"))
+waitFor({ isFailed(cloudflareRuntime.state) }, timeout: 2, label: "invalid Cloudflare hostname rejection")
+cloudflareRuntime.start(cloudflareConfig(hostname: "mcp.example.com", secret: "short"))
+waitFor({ isFailed(cloudflareRuntime.state) }, timeout: 2, label: "short Cloudflare secret rejection")
+let monitor = CloudflareConnectionMonitor()
+precondition(!monitor.consume("INF Registered tunnel "))
+precondition(monitor.consume("connection connIndex=0"))
+precondition(!monitor.consume("Registered tunnel connection"))
+setenv("MCP_TEST_CF_CONNECT_DELAY", "0.5", 1)
+cloudflareRuntime.start(cloudflareConfig(hostname: "mcp.example.com"))
+waitFor({ cloudflareRuntime.state == .starting }, timeout: 2, label: "Cloudflare connecting state")
+Thread.sleep(forTimeInterval: 0.2)
+precondition(cloudflareRuntime.state == .starting, "a spawned process is not yet a connected tunnel")
+waitFor({ cloudflareRuntime.state == .running }, timeout: 5, label: "Cloudflare runtime")
+unsetenv("MCP_TEST_CF_CONNECT_DELAY")
+waitFor({ holdsIdleSleepAssertion() }, timeout: 2, label: "idle sleep assertion for Cloudflare runtime")
+Thread.sleep(forTimeInterval: 0.3)
+logLock.lock()
+let safeCloudflareLog = cloudflareLog
+logLock.unlock()
+precondition(safeCloudflareLog.contains("cloudflared-run-ok token=[REDACTED]"), "Cloudflare log did not redact the tunnel token: \(safeCloudflareLog)")
+precondition(!safeCloudflareLog.contains("eyJaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "Cloudflare log leaked the tunnel token")
+let tokenFile = profileDirectory.appendingPathComponent("cloudflared-cloudflare.token").path
+waitFor({ !FileManager.default.fileExists(atPath: tokenFile) }, timeout: 2, label: "token file removal after connecting")
+cloudflareRuntime.stop()
+waitFor({ cloudflareRuntime.state == .stopped }, timeout: 5, label: "Cloudflare stop")
+
+// Cancellation while waiting for the edge must stop the process and remove the token file.
+setenv("MCP_TEST_CF_CONNECT_DELAY", "10", 1)
+cloudflareRuntime.start(cloudflareConfig(hostname: "mcp.example.com"))
+waitFor({ FileManager.default.fileExists(atPath: tokenFile) }, timeout: 3, label: "Cloudflare token before cancellation")
+cloudflareRuntime.stop()
+waitFor({ cloudflareRuntime.state == .stopped }, timeout: 3, label: "cancel Cloudflare connection")
+precondition(!FileManager.default.fileExists(atPath: tokenFile))
+unsetenv("MCP_TEST_CF_CONNECT_DELAY")
+
+// Older cloudflared without --token-file falls back to the environment, with a warning.
+setenv("MCP_TEST_CF_NO_TOKEN_FILE", "1", 1)
+logLock.lock()
+cloudflareLog = ""
+logLock.unlock()
+cloudflareRuntime.start(cloudflareConfig(hostname: "mcp.example.com"))
+waitFor({ cloudflareRuntime.state == .running }, timeout: 5, label: "Cloudflare runtime without --token-file")
+Thread.sleep(forTimeInterval: 0.3)
+logLock.lock()
+let fallbackLog = cloudflareLog
+logLock.unlock()
+precondition(fallbackLog.contains("does not support --token-file"), "missing --token-file fallback warning: \(fallbackLog)")
+precondition(fallbackLog.contains("cloudflared-run-ok token=[REDACTED]"), "environment fallback did not start: \(fallbackLog)")
+cloudflareRuntime.stop()
+waitFor({ cloudflareRuntime.state == .stopped }, timeout: 5, label: "Cloudflare fallback stop")
+unsetenv("MCP_TEST_CF_NO_TOKEN_FILE")
+
+let runtimeCert = root.appendingPathComponent("runtime-cert.pem")
+try Data("test-cert".utf8).write(to: runtimeCert)
+setenv("TUNNEL_ORIGIN_CERT", runtimeCert.path, 1)
+setenv("MCP_TEST_CF_CERT", runtimeCert.path, 1)
+setenv("MCP_TEST_CF_NAMED", "1", 1)
+do {
+    _ = try CloudflareCLI.credentialsPath(tunnel: "cli-tunnel")
+    preconditionFailure("a tunnel without local credentials must be rejected")
+} catch {
+    precondition(error.localizedDescription.contains("no local credentials"), "unexpected credentials error: \(error)")
+}
+let runtimeCredentials = root.appendingPathComponent("abcdef01-2345-6789-abcd-ef0123456789.json")
+try Data("{}".utf8).write(to: runtimeCredentials)
+let resolvedCredentials = try CloudflareCLI.credentialsPath(tunnel: "cli-tunnel")
+precondition(resolvedCredentials == runtimeCredentials.path)
+let credentialsByID = try CloudflareCLI.credentialsPath(tunnel: "ABCDEF01-2345-6789-ABCD-EF0123456789")
+precondition(credentialsByID == runtimeCredentials.path)
+precondition(CloudflareCLI.localCredentialsPath(for: CloudflareTunnelInfo(id: "../escape", name: "invalid")) == nil)
+cloudflareRuntime.start(LocalMCPConfiguration(
+    provider: .cloudflare, tunnelID: "", apiKey: "",
+    cloudflareToken: "cli-tunnel", cloudflareHostname: "mcp.example.com", cloudflarePathSecret: cloudflareSecret,
+    profile: "cloudflare-cli", port: 18092, allowedDirectory: root.path, healthAddress: "",
+    gitUserName: "", gitUserEmail: "", enableCommands: false
+))
+waitFor({ cloudflareRuntime.state == .running }, timeout: 5, label: "Cloudflare CLI-tunnel runtime")
+Thread.sleep(forTimeInterval: 0.3)
+logLock.lock()
+let cliTunnelLog = cloudflareLog
+logLock.unlock()
+precondition(cliTunnelLog.contains("cloudflared-config-ok"), "CLI-tunnel mode did not pass a valid config: \(cliTunnelLog)")
+cloudflareRuntime.stop()
+waitFor({ cloudflareRuntime.state == .stopped }, timeout: 5, label: "Cloudflare CLI-tunnel stop")
+
+unsetenv("MCP_TEST_CF_NAMED")
+unsetenv("MCP_TEST_CF_CERT")
+unsetenv("TUNNEL_ORIGIN_CERT")
+let cfState = root.appendingPathComponent("cf-state").path
+setenv("MCP_TEST_CF_STATE", cfState, 1)
+let initialTunnels = try CloudflareCLI.listTunnels()
+precondition(initialTunnels == [CloudflareTunnelInfo(id: "11111111-1111-1111-1111-111111111111", name: "alpha")], "tunnel list parse")
+do {
+    _ = try CloudflareCLI.createTunnel(name: "alpha")
+    preconditionFailure("creating a duplicate tunnel name must be rejected")
+} catch {
+    precondition(error.localizedDescription.contains("already exists"), "unexpected duplicate error: \(error)")
+}
+do {
+    _ = try CloudflareCLI.createTunnel(name: "bad name; rm -rf")
+    preconditionFailure("invalid tunnel name must be rejected")
+} catch {
+    precondition(error.localizedDescription.contains("Tunnel name must"), "unexpected name error: \(error)")
+}
+let createdTunnel = try CloudflareCLI.createTunnel(name: "new-tunnel")
+precondition(createdTunnel.id == "22222222-2222-2222-2222-222222222222", "created tunnel id")
+let finalTunnelNames = try CloudflareCLI.listTunnels().map(\.name)
+precondition(finalTunnelNames == ["alpha", "new-tunnel"], "tunnel list is sorted and includes the new tunnel")
+try CloudflareCLI.routeDNS(tunnel: "new-tunnel", hostname: "mcp.example.com")
+do {
+    try CloudflareCLI.routeDNS(tunnel: "new-tunnel", hostname: "https://mcp.example.com")
+    preconditionFailure("invalid DNS hostname must be rejected")
+} catch {
+    precondition(error.localizedDescription.contains("bare hostname"), "unexpected hostname error: \(error)")
+}
+do {
+    try CloudflareCLI.deleteTunnel(name: "missing")
+    preconditionFailure("deleting an unknown tunnel must be rejected")
+} catch {
+    precondition(error.localizedDescription.contains("No tunnel named"), "unexpected delete error: \(error)")
+}
+do {
+    try CloudflareCLI.deleteTunnel(name: "-f; x")
+    preconditionFailure("invalid tunnel name must be rejected before running cloudflared")
+} catch {
+    precondition(error.localizedDescription.contains("Invalid tunnel name"), "unexpected delete name error: \(error)")
+}
+try CloudflareCLI.deleteTunnel(name: "new-tunnel")
+let afterDeleteNames = try CloudflareCLI.listTunnels().map(\.name)
+precondition(afterDeleteNames == ["alpha"], "tunnel list after delete")
+let originCert = root.appendingPathComponent("cf-cert.pem").path
+setenv("TUNNEL_ORIGIN_CERT", originCert, 1)
+precondition(!CloudflareCLI.isLoggedIn(), "no origin certificate yet")
+let firstLoginBackup = try CloudflareCLI.login()
+precondition(firstLoginBackup == nil, "first login has nothing to back up")
+precondition(CloudflareCLI.isLoggedIn(), "login must leave an origin certificate")
+let previousLogin = try CloudflareCLI.login(replacingExisting: true)
+precondition(previousLogin.map { FileManager.default.fileExists(atPath: $0) } == true, "switching accounts keeps the old certificate")
+precondition(CloudflareCLI.isLoggedIn(), "switching accounts must leave a new certificate")
+do {
+    try CloudflareCLI.login(replacingExisting: true, shouldCancel: { true })
+    preconditionFailure("cancelled login must throw")
+} catch {
+    precondition(CloudflareCLI.isCancellation(error), "unexpected cancel error: \(error)")
+}
+precondition(CloudflareCLI.isLoggedIn(), "cancelled switch must restore the previous certificate")
+unsetenv("TUNNEL_ORIGIN_CERT")
+unsetenv("MCP_TEST_CF_STATE")
+print("cloudflare-cli-management: ok")
+print("runtime-cloudflare-provider: ok")
 SWIFT
 
 swiftc -framework Network -framework Security -o "$TMP_DIR/runtime-test" \
@@ -690,6 +973,8 @@ let safeGitServer = try LocalMCPServer(
     gitUserName: "Test User",
     gitUserEmail: "test@example.com",
     enableCommands: false,
+    enableGitPush: true,
+    enableCodexHistory: true,
     localAuthToken: localAuthToken,
     log: { _ in }
 )
@@ -699,10 +984,53 @@ let server = try LocalMCPServer(
     gitUserName: "Test User",
     gitUserEmail: "test@example.com",
     enableCommands: true,
+    enableGitPush: true,
+    enableCodexHistory: true,
     localAuthToken: localAuthToken,
     log: { _ in }
 )
+let cloudflareSecret = String(repeating: "b", count: 64)
+let cloudflareServer = try LocalMCPServer(
+    port: 18090,
+    allowedDirectory: root.path,
+    gitUserName: "Test User",
+    gitUserEmail: "test@example.com",
+    enableCommands: false,
+    localAuthToken: localAuthToken,
+    publicHost: "mcp.example.com",
+    pathSecret: cloudflareSecret,
+    log: { _ in }
+)
+do {
+    _ = try LocalMCPServer(
+        port: 18091, allowedDirectory: root.path, gitUserName: "", gitUserEmail: "",
+        enableCommands: false, localAuthToken: localAuthToken, pathSecret: "short", log: { _ in }
+    )
+    preconditionFailure("short path secret must be rejected")
+} catch {
+    // Expected: the secret is the only credential protecting a public URL.
+}
+try runOAuthPersistenceChecks()
+let oauth = try LocalMCPOAuthServer(issuer: "https://mcp.example.com", pairingSecret: String(repeating: "f", count: 64), policy: "fixture", permissionDescription: "File access only.")
+let oauthServer = try LocalMCPServer(
+    port: 18095, allowedDirectory: root.path, gitUserName: "", gitUserEmail: "",
+    enableCommands: false, localAuthToken: localAuthToken, publicHost: "mcp.example.com", oauth: oauth, log: { _ in }
+)
+try oauthServer.start()
+let limitedServer = try LocalMCPServer(
+    port: 18094, allowedDirectory: root.path, gitUserName: "", gitUserEmail: "",
+    enableCommands: false, localAuthToken: localAuthToken,
+    requestTimeoutSeconds: 0.5, responseTimeoutSeconds: 0.5, maxConnections: 2,
+    log: { _ in }
+)
+try limitedServer.start()
+DispatchQueue.global().async {
+    let stopMarker = root.appendingPathComponent("stop-limited-http")
+    while !FileManager.default.fileExists(atPath: stopMarker.path) { Thread.sleep(forTimeInterval: 0.02) }
+    limitedServer.stop()
+}
 try safeGitServer.start()
+try cloudflareServer.start()
 try server.start()
 // The shell harness owns this process lifetime and terminates it after all
 // transport tests. Do not use a wall-clock timer here: as the suite grows, a
@@ -717,6 +1045,7 @@ swiftc -framework Network -o "$TMP_DIR/server-test" \
     macos/Ripgrep.swift \
     macos/LocalMCPServer.swift \
     macos/CodexHistory.swift \
+    tests/SwiftOAuthChecks.swift \
     "$TMP_DIR/main.swift"
 mkdir -p "$TMP_DIR/git-template"
 printf 'outside-template-marker\n' > "$TMP_DIR/git-template/copied-from-template"
@@ -728,6 +1057,61 @@ BASE_URL="http://127.0.0.1:18088/mcp"
 SAFE_BASE_URL="http://127.0.0.1:18089/mcp"
 SERVER_ROOT="${TMPDIR%/}/filemcp-server-test"
 LOCAL_AUTH_TOKEN="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+python3 - "$SERVER_ROOT" <<'PYSEC'
+import socket,time,json,threading,sys,pathlib
+address=('127.0.0.1',18094)
+def connect():
+    s=socket.create_connection(address,timeout=2)
+    s.settimeout(2)
+    return s
+def closed(s):
+    try:return s.recv(1)==b''
+    except ConnectionResetError:return True
+slow=[connect(),connect()]
+for s in slow:s.sendall(b'POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Partial: ')
+started=time.monotonic()
+stop_dripping=threading.Event()
+def drip():
+    while not stop_dripping.wait(.1):
+        try:slow[0].sendall(b'x')
+        except OSError:return
+worker=threading.Thread(target=drip)
+worker.start()
+time.sleep(.1)
+extra=connect()
+assert closed(extra),'connection limit did not reject the third socket'
+extra.close()
+for s in slow:
+    assert closed(s),'incomplete request was not closed at its deadline'
+    s.close()
+stop_dripping.set()
+worker.join(2)
+assert time.monotonic()-started<1.5,'request deadline must not reset for a slow sender'
+def rpc(method,params):
+    body=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode()
+    request=(f'POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-FileMCP-Local-Token: {"a"*64}\r\nContent-Length: {len(body)}\r\n\r\n').encode()+body
+    with connect() as s:
+        s.sendall(request)
+        response=b''
+        while True:
+            part=s.recv(65536)
+            if not part:break
+            response+=part
+    return json.loads(response.split(b'\r\n\r\n',1)[1])
+assert rpc('ping',{})['result']=={}
+names={t['name'] for t in rpc('tools/list',{})['result']['tools']}
+assert 'git_push' not in names and 'save_conversation_to_codex' not in names
+for name,args in [('git_push',{}),('save_conversation_to_codex',{'title':'blocked','messages':[{'role':'user','content':'test'}]})]:
+    result=rpc('tools/call',{'name':name,'arguments':args})
+    assert 'error' in result or result.get('result',{}).get('isError') is True,result
+pending=connect()
+pending.sendall(b'POST /mcp HTTP/1.1\r\nHost: localhost\r\n')
+pathlib.Path(sys.argv[1],'stop-limited-http').touch()
+assert closed(pending),'server stop must close accepted sockets'
+pending.close()
+print('http-deadline-connection-cap-shutdown-and-permission-defaults: ok')
+PYSEC
 
 UNAUTHENTICATED="$(command curl -sS -i -X POST "$BASE_URL" \
     -H 'Content-Type: application/json' \
@@ -747,6 +1131,124 @@ printf '%s' "$UNAUTHENTICATED_UNKNOWN_PATH" | grep -q 'HTTP/1.1 401 Unauthorized
 
 UNAUTHENTICATED_DISCOVERY_POST="$(command curl -sS -i -X POST 'http://127.0.0.1:18088/.well-known/oauth-protected-resource/mcp')"
 printf '%s' "$UNAUTHENTICATED_DISCOVERY_POST" | grep -q 'HTTP/1.1 401 Unauthorized'
+
+CF_PING='{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+CF_SECRET="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+CF_OK="$(command curl -sS -i -X POST "http://127.0.0.1:18090/mcp/$CF_SECRET" \
+    -H 'Host: mcp.example.com' -H 'Content-Type: application/json' -d "$CF_PING")"
+printf '%s' "$CF_OK" | grep -q 'HTTP/1.1 200 OK'
+CF_NO_SECRET="$(command curl -sS -i -X POST "http://127.0.0.1:18090/mcp" \
+    -H 'Host: mcp.example.com' -H 'Content-Type: application/json' -d "$CF_PING")"
+printf '%s' "$CF_NO_SECRET" | grep -q 'HTTP/1.1 401 Unauthorized'
+CF_WRONG_SECRET="$(command curl -sS -i -X POST "http://127.0.0.1:18090/mcp/${CF_SECRET%b}c" \
+    -H 'Host: mcp.example.com' -H 'Content-Type: application/json' -d "$CF_PING")"
+printf '%s' "$CF_WRONG_SECRET" | grep -q 'HTTP/1.1 401 Unauthorized'
+CF_BAD_HOST="$(command curl -sS -i -X POST "http://127.0.0.1:18090/mcp/$CF_SECRET" \
+    -H 'Host: evil.example.com' -H 'Content-Type: application/json' -d "$CF_PING")"
+printf '%s' "$CF_BAD_HOST" | grep -q 'HTTP/1.1 403 Forbidden'
+CF_DISCOVERY="$(command curl -sS -i "http://127.0.0.1:18090/.well-known/oauth-protected-resource/mcp/$CF_SECRET" \
+    -H 'Host: mcp.example.com')"
+printf '%s' "$CF_DISCOVERY" | grep -q 'HTTP/1.1 404 Not Found'
+# Only the secret-bearing discovery path is public; other well-known suffixes still need auth.
+CF_DISCOVERY_OTHER="$(command curl -sS -i "http://127.0.0.1:18090/.well-known/oauth-protected-resource/anything" \
+    -H 'Host: mcp.example.com')"
+printf '%s' "$CF_DISCOVERY_OTHER" | grep -q 'HTTP/1.1 401 Unauthorized'
+# Without a configured public host or path secret, neither feature may be reachable.
+PLAIN_HOST="$(command curl -sS -i -X POST "http://127.0.0.1:18088/mcp/$CF_SECRET" \
+    -H 'Host: mcp.example.com' -H 'Content-Type: application/json' -d "$CF_PING")"
+printf '%s' "$PLAIN_HOST" | grep -q 'HTTP/1.1 403 Forbidden'
+echo "cloudflare-path-secret-auth: ok"
+
+python3 - <<'PYOAUTH'
+import base64,hashlib,http.client,json,re,urllib.parse
+HOST='mcp.example.com'
+RESOURCE='https://'+HOST+'/mcp'
+PAIRING='f'*64
+
+def request(method,path,data=None,content_type=None,token=None,origin=None):
+    headers={'Host':HOST,'Origin':'https://'+HOST}
+    if content_type:headers['Content-Type']=content_type
+    if token:headers['Authorization']='Bearer '+token
+    if origin:headers['Origin']=origin
+    connection=http.client.HTTPConnection('127.0.0.1',18095,timeout=3)
+    connection.request(method,path,body=data,headers=headers)
+    response=connection.getresponse()
+    result=(response.status,dict(response.getheaders()),response.read())
+    connection.close()
+    return result
+
+def form(path,values):return request('POST',path,urllib.parse.urlencode(values),'application/x-www-form-urlencoded')
+def payload(response):return json.loads(response[2])
+status,headers,_=request('POST','/mcp',b'{}','application/json')
+assert status==401 and 'resource_metadata=' in headers['WWW-Authenticate']
+assert request('POST','/mcp',b'{}','application/json',PAIRING)[0]==401,'pairing code must not be an MCP access token'
+assert request('POST','/mcp/'+PAIRING,b'{}','application/json')[0]==401,'URL secrets must be disabled in OAuth mode'
+metadata=payload(request('GET','/.well-known/oauth-protected-resource/mcp'))
+assert metadata['resource']==RESOURCE and metadata['bearer_methods_supported']==['header']
+authorization=payload(request('GET','/.well-known/oauth-authorization-server'))
+assert authorization['code_challenge_methods_supported']==['S256']
+assert authorization['token_endpoint_auth_methods_supported']==['none']
+assert request('POST','/oauth/register',json.dumps({'redirect_uris':['file:///tmp/unsafe']}).encode(),'application/json')[0]==400
+client=payload(request('POST','/oauth/register',json.dumps({'redirect_uris':['https://chatgpt.com/connector_platform_oauth_redirect'],'client_name':'ChatGPT <script>','token_endpoint_auth_method':'none'}).encode(),'application/json'))['client_id']
+VERIFIER='v'*64
+CHALLENGE=base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest()).decode().rstrip('=')
+redirect='https://chatgpt.com/connector_platform_oauth_redirect'
+
+def authorize(pairing=PAIRING):
+    params={'response_type':'code','client_id':client,'redirect_uri':redirect,'resource':RESOURCE,'scope':'mcp','state':'preserved-state','code_challenge_method':'S256','code_challenge':CHALLENGE}
+    page=request('GET','/oauth/authorize?'+urllib.parse.urlencode(params))
+    assert page[0]==200 and PAIRING.encode() not in page[2] and b'ChatGPT &lt;script&gt;' in page[2]
+    assert "frame-ancestors 'none'" in page[1]['Content-Security-Policy']
+    assert "form-action 'self' https://chatgpt.com;" in page[1]['Content-Security-Policy']
+    style_nonce=re.search(rb'<style nonce="([^\"]+)"',page[2]).group(1).decode()
+    assert "style-src 'nonce-"+style_nonce+"'" in page[1]['Content-Security-Policy']
+    assert "unsafe-inline" not in page[1]['Content-Security-Policy']
+    assert b'<script' not in page[2] and b'aria-describedby="code-help"' in page[2]
+    assert page[1]['Referrer-Policy']=='same-origin', 'Browser form POST must preserve same-origin Origin'
+    nonce=re.search(rb'name="request_id" value="([^"]+)"',page[2]).group(1).decode()
+    body=urllib.parse.urlencode({'request_id':nonce,'pairing_code':pairing})
+    for blocked in ['null','https://evil.example','https://'+HOST+'.evil.example']:
+        assert request('POST','/oauth/authorize',body,'application/x-www-form-urlencoded',origin=blocked)[0]==403
+    return request('POST','/oauth/authorize',body,'application/x-www-form-urlencoded',origin='https://'+HOST)
+
+def exchange(code,verifier=VERIFIER,resource=RESOURCE):
+    return form('/oauth/token',{'grant_type':'authorization_code','client_id':client,'code':code,'redirect_uri':redirect,'code_verifier':verifier,'resource':resource})
+def code_from(response):
+    assert response[0]==302,response
+    query=urllib.parse.parse_qs(urllib.parse.urlsplit(response[1]['Location']).query)
+    assert query['state']==['preserved-state'] and query['iss']==['https://'+HOST]
+    assert 'access_token' not in query
+    return query['code'][0]
+def ping(token):return request('POST','/mcp',json.dumps({'jsonrpc':'2.0','id':1,'method':'ping','params':{}}).encode(),'application/json',token)
+assert authorize('wrong')[0]==403
+code=code_from(authorize())
+assert exchange(code,resource='https://other.example/mcp')[0]==400
+issued=exchange(code)
+assert issued[0]==200,issued
+tokens=payload(issued)
+assert tokens['token_type']=='Bearer' and tokens['expires_in']==3600
+assert ping(tokens['access_token'])[0]==200
+tool_listing=payload(request('POST','/mcp',json.dumps({'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}).encode(),'application/json',tokens['access_token']))['result']['tools']
+assert all(tool['securitySchemes']==[{'type':'oauth2','scopes':['mcp']}] for tool in tool_listing)
+assert not {'git_push','save_conversation_to_codex'} & {tool['name'] for tool in tool_listing}
+assert exchange(code)[0]==400,'authorization codes must be single-use'
+refresh=form('/oauth/token',{'grant_type':'refresh_token','client_id':client,'refresh_token':tokens['refresh_token'],'resource':RESOURCE})
+assert refresh[0]==200,refresh
+rotated=payload(refresh)
+assert rotated['refresh_token']!=tokens['refresh_token']
+assert ping(tokens['access_token'])[0]==401 and ping(rotated['access_token'])[0]==200
+assert form('/oauth/token',{'grant_type':'refresh_token','client_id':client,'refresh_token':tokens['refresh_token'],'resource':RESOURCE})[0]==400
+assert ping(rotated['access_token'])[0]==401,'refresh-token replay must revoke its token family'
+wrong_pkce=code_from(authorize())
+assert exchange(wrong_pkce,'x'*64)[0]==400
+assert exchange(wrong_pkce)[0]==400,'an invalid PKCE exchange consumes the code'
+final=payload(exchange(code_from(authorize())))
+assert ping(final['access_token'])[0]==200
+assert form('/oauth/revoke',{'client_id':client,'token':final['refresh_token']})[0]==200
+assert ping(final['access_token'])[0]==401
+print('oauth-discovery-pkce-resource-binding-rotation-replay-and-revocation: ok')
+PYOAUTH
+
 
 DOCTOR_RESULT="$(CONTROL_PLANE_API_KEY=dummy-key "$TUNNEL_BIN" doctor \
     --control-plane.tunnel-id tunnel_0123456789abcdef0123456789abcdef \

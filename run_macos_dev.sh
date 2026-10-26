@@ -5,7 +5,8 @@ cd "$(dirname "$0")"
 
 ROOT="$PWD"
 BUILD_DIR="${MCP_MACOS_DEV_BUILD_DIR:-$ROOT/build/macos-dev}"
-UI_BIN="$BUILD_DIR/FileMCP"
+APP="$BUILD_DIR/FileMCP.app"
+UI_BIN="$APP/Contents/MacOS/FileMCP"
 SWIFTC="${SWIFTC:-swiftc}"
 
 if ! command -v "$SWIFTC" >/dev/null 2>&1; then
@@ -29,11 +30,15 @@ for required_binary in "$TUNNEL_BIN" "$RG_BIN"; do
     fi
 done
 
-mkdir -p "$BUILD_DIR"
-cp "$TUNNEL_BIN" "$BUILD_DIR/tunnel-client"
-chmod 755 "$BUILD_DIR/tunnel-client"
-cp "$RG_BIN" "$BUILD_DIR/rg"
-chmod 755 "$BUILD_DIR/rg"
+"$ROOT/build_macos_icon.sh"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/build/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/assets/branding/filemcp-v2/app-icon-128.png" "$APP/Contents/Resources/FileMCP-login.png"
+cp "$TUNNEL_BIN" "$APP/Contents/MacOS/tunnel-client"
+chmod 755 "$APP/Contents/MacOS/tunnel-client"
+cp "$RG_BIN" "$APP/Contents/MacOS/rg"
+chmod 755 "$APP/Contents/MacOS/rg"
 
 echo "Compiling full Swift macOS app ..."
 "$SWIFTC" \
@@ -52,8 +57,9 @@ echo "Compiling full Swift macOS app ..."
     "$ROOT/macos/main.swift"
 
 echo "Starting FileMCP dev app"
+echo "  App bundle:    $APP"
 echo "  Swift binary:  $UI_BIN"
-echo "  tunnel-client: $BUILD_DIR/tunnel-client"
-echo "  ripgrep:       $BUILD_DIR/rg"
+echo "  tunnel-client: $APP/Contents/MacOS/tunnel-client"
+echo "  ripgrep:       $APP/Contents/MacOS/rg"
 echo
 exec "$UI_BIN"

@@ -2,12 +2,15 @@
 
 All notable changes will be documented in this file from the first public release onward.
 
-The repository has private development history from before its open-source publication. That history is intentionally not reconstructed here as release history.
-
 ## Unreleased
+
+- Simplified Connection with an active-session summary, full-width MCP endpoint, grouped copy actions and collapsible Cloudflare management.
+
+- Redesigned the OAuth login page with responsive light/dark styling, accessible code entry and explicit access details; styles use a per-response CSP nonce.
 
 ### Added
 
+- Optional Cloudflare Tunnel provider (macOS): run `cloudflared` with a tunnel token and a public hostname instead of the OpenAI Secure MCP Tunnel, authenticated by a Keychain-stored secret in the MCP URL path.
 - Open-source project license and contribution/security documentation.
 - GitHub Actions macOS and Windows CI verification.
 - Reproducible source-archive packaging from tracked Git content only.
@@ -28,13 +31,19 @@ The repository has private development history from before its open-source publi
 
 ### Changed
 
+- Redesigned the FileMCP identity with a flat folded-document symbol with a custom folded M monogram, crimson (#DB0F30) palette, layered gradient artwork and light/dark/monochrome vector logos, transparent PNGs and matching macOS/Windows application icons. Added a reproducible brand-kit exporter.
+- Cloudflare on macOS now defaults to OAuth with PKCE, a private app login code, hashed Keychain session storage, rotating refresh tokens and revocation on replay or permission/workspace changes. Secret-URL authentication requires explicit compatibility opt-in.
+- macOS HTTP transport now bounds active connections, request-read time and response-write time, and cancels sockets on shutdown.
+- Added separate, default-off macOS permissions for Git push and writing to Codex history, plus full-history/source secret scanning in CI.
+- Improved the macOS Connection, Workspace and Activity tabs with a persistent connection action, workspace/access summary, cancellable startup, inline connection errors, log-copy feedback and an empty activity state. Configuration is locked while sharing; Quit remains in the standard app menu.
+- Cloudflare startup now waits for edge registration, recognizes registration messages split across reads, checks local tunnel credentials, and uses the same origin certificate for management and connection. Tunnel log redaction also handles secrets split across stdout/stderr reads.
 - Replaced the hand-written recursive scanners behind `search_code` and `repo_overview` with ripgrep, and replaced `search_content`/`search_filenames` with `grep`/`glob`. Searches now respect `.gitignore`/`.ignore` by default (opt out with `include_ignored`), always reject explicit `.git` targets, and avoid prematurely exhausting recursive-scan byte budgets on binary or build-output trees while reporting bounded/truncated coverage explicitly.
 
 - Updated the bundled OpenAI `tunnel-client` to v0.0.12 with upstream NOTICE and third-party license evidence, including official Windows AMD64/ARM64 binaries.
 - Rebranded the macOS app and MCP server identity from Local Files MCP to FileMCP.
 - Updated the app bundle/executable names, default profile, default shared folder, documentation, and release artifact naming for FileMCP.
 - Removed the persistent menu-bar status item; FileMCP now relies on the Dock and the standard macOS application menu.
-- Moved the quit action into a fixed window footer and made advanced settings resize the window between compact and expanded states.
+- Made advanced settings resize the window between compact and expanded states.
 - Polished the native macOS UI with a wider layout, clearer connection-state actions, English labels/errors/runtime messages, collapsible advanced settings, and standard App/Edit/Window menus.
 - Preserved the existing bundle identifier and Keychain namespace so local settings and saved runtime credentials continue to migrate safely across the rebrand.
 - Hardened local HTTP parsing with required local authentication, strict `Host`/`Origin` and header syntax checks, bounded framing, and rejection of trailing body bytes.

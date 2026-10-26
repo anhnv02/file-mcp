@@ -89,6 +89,7 @@ final class ProcessRunner {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         timeoutSeconds: Int,
         outputLimitBytes: Int = defaultOutputLimitBytes,
+        maxTimeoutSeconds: Int = maxCommandTimeoutSeconds,
         shouldCancel: (() -> Bool)? = nil
     ) throws -> ProcessResult {
         let handles = try spawn(
@@ -104,7 +105,7 @@ final class ProcessRunner {
         drain(handles.stdoutRead, into: stdoutBuffer, group: readers)
         drain(handles.stderrRead, into: stderrBuffer, group: readers)
 
-        let timeout = max(1, min(timeoutSeconds, maxCommandTimeoutSeconds))
+        let timeout = max(1, min(timeoutSeconds, maxTimeoutSeconds))
         let deadline = Date().addingTimeInterval(TimeInterval(timeout))
         var status: Int32 = 0
         var timedOut = false
@@ -167,6 +168,7 @@ final class ProcessRunner {
         arguments: [String],
         cwd: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        sensitiveValues: [String] = [],
         onOutput: @escaping (String) -> Void,
         onExit: @escaping (Int32) -> Void
     ) throws -> ManagedProcess {
@@ -176,7 +178,7 @@ final class ProcessRunner {
             cwd: cwd,
             environment: environment
         )
-        return ManagedProcess(handles: handles, onOutput: onOutput, onExit: onExit)
+        return ManagedProcess(handles: handles, sensitiveValues: sensitiveValues, onOutput: onOutput, onExit: onExit)
     }
 
     private static func spawn(
@@ -345,17 +347,20 @@ final class ManagedProcess {
     private let stateLock = NSLock()
     private let readerGroup = DispatchGroup()
     private var running = true
+    private let sensitiveValues: [String]
     private let onOutput: (String) -> Void
     private let onExit: (Int32) -> Void
 
     fileprivate init(
         handles: SpawnHandles,
+        sensitiveValues: [String],
         onOutput: @escaping (String) -> Void,
         onExit: @escaping (Int32) -> Void
     ) {
         pid = handles.pid
         stdoutRead = handles.stdoutRead
         stderrRead = handles.stderrRead
+        self.sensitiveValues = sensitiveValues
         self.onOutput = onOutput
         self.onExit = onExit
         startReaders()
@@ -391,10 +396,11 @@ final class ManagedProcess {
     private func startReaders() {
         for handle in [stdoutRead, stderrRead] {
             readerGroup.enter()
-            ProcessRunner.readerQueue.async { [readerGroup, onOutput] in
+            ProcessRunner.readerQueue.async { [readerGroup, onOutput, sensitiveValues] in
                 defer { readerGroup.leave() }
                 var buffer = [UInt8](repeating: 0, count: 16_384)
                 var pending = Data()
+                let redactor = StreamingSecretRedactor(secrets: sensitiveValues)
                 while true {
                     // POSIX read returns available pipe bytes immediately. Foundation's
                     // read(upToCount:) can wait to fill the requested size on a pipe.
@@ -412,11 +418,13 @@ final class ManagedProcess {
                         (byte >= 0xe0 && byte <= 0xef ? 3 : (byte >= 0xf0 && byte <= 0xf4 ? 4 : 1))
                     if width > end - lead { end = lead }
                     if end > 0 {
-                        onOutput(String(decoding: pending.prefix(end), as: UTF8.self))
+                        let safe = redactor.append(String(decoding: pending.prefix(end), as: UTF8.self))
+                        if !safe.isEmpty { onOutput(safe) }
                         pending = Data(pending.dropFirst(end))
                     }
                 }
-                if !pending.isEmpty { onOutput(String(decoding: pending, as: UTF8.self)) }
+                let tail = redactor.append(String(decoding: pending, as: UTF8.self), final: true)
+                if !tail.isEmpty { onOutput(tail) }
             }
         }
     }
@@ -448,5 +456,36 @@ final class ManagedProcess {
             self.stateLock.unlock()
             self.onExit(ProcessRunner.decodeExitCode(status))
         }
+    }
+}
+
+/// One instance per pipe: a secret may span arbitrary reads, but never two streams.
+final class StreamingSecretRedactor {
+    private let secrets: [String]
+    private var pending = ""
+
+    init(secrets: [String]) {
+        self.secrets = secrets.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
+    }
+
+    func append(_ text: String, final: Bool = false) -> String {
+        guard !secrets.isEmpty else { return text }
+        pending += text
+        var output = ""
+        var cursor = pending.startIndex
+        while cursor < pending.endIndex {
+            let remaining = pending[cursor...]
+            if let secret = secrets.first(where: { remaining.hasPrefix($0) }) {
+                output += "[REDACTED]"
+                cursor = pending.index(cursor, offsetBy: secret.count)
+            } else if !final && secrets.contains(where: { $0.hasPrefix(remaining) }) {
+                break
+            } else {
+                output.append(pending[cursor])
+                cursor = pending.index(after: cursor)
+            }
+        }
+        pending = String(pending[cursor...])
+        return output
     }
 }

@@ -8,6 +8,25 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go for the pinned scanner
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Install Gitleaks
+        run: GOBIN="$RUNNER_TEMP/security-bin" go install github.com/zricethezav/gitleaks/v8@v8.30.1
+      - name: Scan history and public source files
+        run: PATH="$RUNNER_TEMP/security-bin:$PATH" bash tests/check_secrets.sh
+
   verify-macos:
     runs-on: macos-26
     timeout-minutes: 15
@@ -27,24 +46,43 @@ jobs:
           test -s vendor/tunnel-client/NOTICE
           test -s vendor/tunnel-client/darwin-arm64/THIRD-PARTY-LICENSES.txt
 
+      - name: Verify vendored ripgrep
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat vendor/ripgrep/VERSION)" = "15.2.0"
+          test "$(shasum -a 256 vendor/ripgrep/darwin-arm64/rg | awk '{print $1}')" = "a326a1fb48074202e9ad41e4cd1e389eeea372c8c6f7d7e80da81176d5d9430e"
+          vendor/ripgrep/darwin-arm64/rg --version | grep -q '^ripgrep 15.2.0 '
+          test -s vendor/ripgrep/COPYING
+          test -s vendor/ripgrep/LICENSE-MIT
+          test -s vendor/ripgrep/UNLICENSE
+
       - name: Static verification
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash -n build_macos_app.sh build_macos_icon.sh create_source_archive.sh run_macos_dev.sh tests/test_swift_runtime.sh
+          bash -n build_macos_app.sh build_macos_icon.sh build_brand_assets.sh create_source_archive.sh run_macos_dev.sh tests/test_swift_runtime.sh tests/test_swift_ui.sh tests/check_secrets.sh
           plutil -lint macos/Info.plist
           swiftc -warnings-as-errors -typecheck \
             -framework AppKit \
             -framework Network \
             -framework Security \
             macos/ProcessRunner.swift \
+            macos/Ripgrep.swift \
             macos/LocalMCPServer.swift \
+            macos/CodexHistory.swift \
             macos/LocalMCPRuntime.swift \
             macos/FileMCPApp.swift \
             macos/main.swift
 
       - name: Integration tests
-        run: ./tests/test_swift_runtime.sh
+        run: MCP_EXTENDED_SEARCH_TESTS=1 ./tests/test_swift_runtime.sh
+
+      - name: UI state regression tests
+        run: bash tests/test_swift_ui.sh
+
+      - name: Coding tool regression tests
+        run: bash tests/test_swift_agent_tools.sh
 
       - name: Build app
         run: ./build_macos_app.sh
@@ -57,6 +95,12 @@ jobs:
           cmp vendor/tunnel-client/LICENSE dist/FileMCP.app/Contents/Resources/tunnel-client-LICENSE.txt
           cmp vendor/tunnel-client/NOTICE dist/FileMCP.app/Contents/Resources/tunnel-client-NOTICE.txt
           cmp vendor/tunnel-client/darwin-arm64/THIRD-PARTY-LICENSES.txt dist/FileMCP.app/Contents/Resources/tunnel-client-THIRD-PARTY-LICENSES.txt
+          cmp vendor/ripgrep/darwin-arm64/rg dist/FileMCP.app/Contents/MacOS/rg
+          cmp vendor/ripgrep/COPYING dist/FileMCP.app/Contents/Resources/ripgrep-COPYING.txt
+          cmp vendor/ripgrep/LICENSE-MIT dist/FileMCP.app/Contents/Resources/ripgrep-LICENSE-MIT.txt
+          cmp vendor/ripgrep/UNLICENSE dist/FileMCP.app/Contents/Resources/ripgrep-UNLICENSE.txt
+          cmp assets/branding/filemcp-v2/app-icon-128.png dist/FileMCP.app/Contents/Resources/FileMCP-login.png
+          test -s dist/FileMCP.app/Contents/Resources/AppIcon.icns
 
   verify-windows:
     runs-on: windows-2025
@@ -84,6 +128,19 @@ jobs:
           if (-not (Test-Path vendor/tunnel-client/NOTICE -PathType Leaf)) { throw "Missing NOTICE." }
           if (-not (Test-Path vendor/tunnel-client/windows-amd64/THIRD-PARTY-LICENSES.txt -PathType Leaf)) { throw "Missing windows-amd64 license sidecar." }
           if (-not (Test-Path vendor/tunnel-client/windows-arm64/THIRD-PARTY-LICENSES.txt -PathType Leaf)) { throw "Missing windows-arm64 license sidecar." }
+
+      - name: Verify vendored ripgrep
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((Get-Content vendor/ripgrep/VERSION -Raw).Trim() -ne "15.2.0") { throw "Unexpected ripgrep version." }
+          if ((Get-FileHash vendor/ripgrep/windows-amd64/rg.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680") { throw "windows-amd64 ripgrep checksum mismatch." }
+          if ((Get-FileHash vendor/ripgrep/windows-arm64/rg.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne "d33a29a9ef03c9f4c03be9e8d88498e6e2d2e566d64cdbdef97f9afc8f13120c") { throw "windows-arm64 ripgrep checksum mismatch." }
+          $version = & vendor/ripgrep/windows-amd64/rg.exe --version | Select-Object -First 1
+          if ($version -notmatch '^ripgrep 15\.2\.0 ') { throw "Unexpected ripgrep version output: $version" }
+          foreach ($file in @("COPYING", "LICENSE-MIT", "UNLICENSE")) {
+            if (-not (Test-Path "vendor/ripgrep/$file" -PathType Leaf)) { throw "Missing ripgrep $file." }
+          }
 
       - name: Build Windows solution
         shell: pwsh
@@ -114,15 +171,21 @@ jobs:
               throw "Release file mismatch: $Expected vs $Actual"
             }
           }
+          Assert-SameFile assets/branding/filemcp-v2/FileMCP.ico windows/assets/filemcp.ico
           foreach ($arch in @("x64", "arm64")) {
             $root = "dist/windows-$arch/FileMCP"
             if (-not (Test-Path "$root/FileMCP.exe" -PathType Leaf)) { throw "Missing FileMCP.exe for $arch." }
             if (-not (Test-Path "$root/tunnel-client.exe" -PathType Leaf)) { throw "Missing tunnel-client.exe for $arch." }
+            if (-not (Test-Path "$root/rg.exe" -PathType Leaf)) { throw "Missing rg.exe for $arch." }
             Assert-SameFile LICENSE "$root/FileMCP-LICENSE.txt"
             Assert-SameFile vendor/tunnel-client/LICENSE "$root/tunnel-client-LICENSE.txt"
             Assert-SameFile vendor/tunnel-client/NOTICE "$root/tunnel-client-NOTICE.txt"
             $vendorTag = if ($arch -eq "arm64") { "windows-arm64" } else { "windows-amd64" }
             Assert-SameFile "vendor/tunnel-client/$vendorTag/THIRD-PARTY-LICENSES.txt" "$root/tunnel-client-THIRD-PARTY-LICENSES.txt"
+            Assert-SameFile "vendor/ripgrep/$vendorTag/rg.exe" "$root/rg.exe"
+            Assert-SameFile vendor/ripgrep/COPYING "$root/ripgrep-COPYING.txt"
+            Assert-SameFile vendor/ripgrep/LICENSE-MIT "$root/ripgrep-LICENSE-MIT.txt"
+            Assert-SameFile vendor/ripgrep/UNLICENSE "$root/ripgrep-UNLICENSE.txt"
           }
 
       - name: Upload Windows x64 package

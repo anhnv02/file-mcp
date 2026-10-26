@@ -2,9 +2,22 @@ import Foundation
 import Darwin
 import Security
 
+enum TunnelProvider: String {
+    case openAI = "openai"
+    case cloudflare = "cloudflare"
+}
+
 struct LocalMCPConfiguration {
+    var provider: TunnelProvider = .openAI
     let tunnelID: String
     let apiKey: String
+    // Cloudflare provider only.
+    var cloudflareToken: String = ""
+    var cloudflareHostname: String = ""
+    var cloudflarePathSecret: String = ""
+    var allowCloudflareURLSecret: Bool = false
+    var cloudflareOAuthState: Data? = nil
+    var saveCloudflareOAuthState: ((Data) throws -> Void)? = nil
     let profile: String
     let port: UInt16
     let allowedDirectory: String
@@ -12,6 +25,8 @@ struct LocalMCPConfiguration {
     let gitUserName: String
     let gitUserEmail: String
     let enableCommands: Bool
+    var enableGitPush: Bool = false
+    var enableCodexHistory: Bool = false
 }
 
 enum LocalMCPRuntimeState: Equatable {
@@ -97,6 +112,10 @@ final class LocalMCPRuntime {
     private var profileLock: ProfileLock?
     private var sleepActivity: NSObjectProtocol?
     private var requestedStop = false
+    private let recentOutputLock = NSLock()
+    private var recentOutputLines: [String] = []
+    private var cloudflaredTokenFile: String?
+    private var tunnelAttempt = UUID()
     private let profileDirectoryOverride: URL?
 
     var onStateChange: ((LocalMCPRuntimeState) -> Void)?
@@ -151,6 +170,7 @@ final class LocalMCPRuntime {
 
     private func shutdownOnQueue() {
         tunnelProcess?.stopSynchronously()
+        removeCloudflaredTokenFile()
         server?.stop()
         server = nil
         profileLock?.release()
@@ -168,7 +188,11 @@ final class LocalMCPRuntime {
             setStopRequested(false)
             return
         }
+        tunnelAttempt = UUID()
         setState(.starting)
+        recentOutputLock.lock()
+        recentOutputLines = []
+        recentOutputLock.unlock()
 
         do {
             let healthAddress = try validateConfiguration(configuration)
@@ -177,17 +201,39 @@ final class LocalMCPRuntime {
             profileLock = lock
 
             let localAuthToken = try makeLocalAuthToken()
+            let isCloudflare = configuration.provider == .cloudflare
+            let oauth: LocalMCPOAuthServer?
+            if isCloudflare && !configuration.allowCloudflareURLSecret {
+                let permissions = "Read, edit and delete files in the shared folder."
+                    + (configuration.enableCommands ? " Run shell commands with your macOS user privileges." : " Shell commands are disabled.")
+                    + (configuration.enableGitPush ? " Push code to configured remote servers." : "")
+                    + (configuration.enableCodexHistory ? " Write conversations to Codex history outside the folder." : "")
+                let policy = Self.canonicalWorkspacePath(configuration.allowedDirectory) + "|" + permissions
+                oauth = try LocalMCPOAuthServer(issuer: "https://" + configuration.cloudflareHostname,
+                    pairingSecret: configuration.cloudflarePathSecret, policy: policy, permissionDescription: permissions,
+                    persistedState: configuration.cloudflareOAuthState, persist: configuration.saveCloudflareOAuthState)
+            } else { oauth = nil }
             let server = try LocalMCPServer(
                 port: configuration.port,
                 allowedDirectory: configuration.allowedDirectory,
                 gitUserName: configuration.gitUserName,
                 gitUserEmail: configuration.gitUserEmail,
                 enableCommands: configuration.enableCommands,
+                enableGitPush: configuration.enableGitPush,
+                enableCodexHistory: configuration.enableCodexHistory,
                 localAuthToken: localAuthToken,
+                publicHost: isCloudflare ? configuration.cloudflareHostname : nil,
+                pathSecret: isCloudflare && configuration.allowCloudflareURLSecret ? configuration.cloudflarePathSecret : nil,
+                oauth: oauth,
                 log: { [weak self] text in self?.emitLog(text) }
             )
             try server.start()
             self.server = server
+
+            if isCloudflare {
+                try startCloudflared(configuration)
+                return
+            }
 
             let tunnelClient = try tunnelClientPath()
             let profileDirectory = try tunnelProfileDirectory()
@@ -255,9 +301,12 @@ final class LocalMCPRuntime {
                     "--health-listen-addr", healthAddress,
                 ],
                 environment: environment,
+                sensitiveValues: sensitiveValues,
                 onOutput: { [weak self] text in
                     guard let self else { return }
-                    self.emitLog(self.redactSensitiveValues(text, sensitiveValues: sensitiveValues))
+                    let safe = self.redactSensitiveValues(text, sensitiveValues: sensitiveValues)
+                    self.recordOutput(safe)
+                    self.emitLog(safe)
                 },
                 onExit: { [weak self] exitCode in
                     self?.queue.async {
@@ -276,6 +325,7 @@ final class LocalMCPRuntime {
             server?.stop()
             server = nil
             tunnelProcess = nil
+            removeCloudflaredTokenFile()
             profileLock?.release()
             profileLock = nil
             setState(.failed(error.localizedDescription))
@@ -283,8 +333,148 @@ final class LocalMCPRuntime {
         }
     }
 
+    private func startCloudflared(_ configuration: LocalMCPConfiguration) throws {
+        let cloudflared = try CloudflareCLI.locate()
+        let isNamedTunnel = Self.isCloudflareTunnelName(configuration.cloudflareToken)
+        let sensitiveValues = [
+            isNamedTunnel ? "" : configuration.cloudflareToken, configuration.cloudflarePathSecret,
+        ].filter { !$0.isEmpty }
+        var environment = CloudflareCLI.environment()
+        var arguments = ["tunnel", "--no-autoupdate"]
+        if isNamedTunnel {
+            // CLI-created (locally-managed) tunnel: ingress lives in a config file, credentials in ~/.cloudflared.
+            let credentials = try CloudflareCLI.credentialsPath(tunnel: configuration.cloudflareToken, shouldCancel: { [weak self] in self?.isStopRequested ?? true })
+            let configPath = try writeCloudflaredConfig(configuration)
+            arguments += ["--config", configPath, "run", "--credentials-file", credentials, configuration.cloudflareToken]
+        } else if CloudflareCLI.supportsTokenFile(cloudflared, shouldCancel: { [weak self] in self?.isStopRequested ?? true }) {
+            // Neither argv nor the environment: both can be read back from a running process
+            // (`ps -E`). The file is removed once the tunnel has connected.
+            arguments += ["run", "--token-file", try writeCloudflaredTokenFile(configuration)]
+        } else {
+            emitLog("WARNING: this cloudflared does not support --token-file, so the tunnel token is passed in the process environment. Update cloudflared (brew upgrade cloudflared).\n")
+            environment["TUNNEL_TOKEN"] = configuration.cloudflareToken
+            arguments.append("run")
+        }
+
+        if isStopRequested {
+            finishStop()
+            return
+        }
+        let attempt = tunnelAttempt
+        let connectionMonitor = CloudflareConnectionMonitor()
+        emitLog("Starting Cloudflare Tunnel…\n")
+        let managed = try ProcessRunner.startManaged(
+            executable: cloudflared,
+            arguments: arguments,
+            environment: environment,
+            sensitiveValues: sensitiveValues,
+            onOutput: { [weak self] text in
+                guard let self else { return }
+                let safe = self.redactSensitiveValues(text, sensitiveValues: sensitiveValues)
+                self.recordOutput(safe)
+                self.emitLog(safe)
+                if connectionMonitor.consume(text) {
+                    self.queue.async {
+                        guard self.tunnelAttempt == attempt, self.state == .starting, !self.isStopRequested else { return }
+                        self.removeCloudflaredTokenFile()
+                        self.setState(.running)
+                        self.emitLog("Cloudflare Tunnel connected.\n")
+                    }
+                }
+            },
+            onExit: { [weak self] exitCode in
+                self?.queue.async {
+                    self?.tunnelDidExit(exitCode: exitCode)
+                }
+            }
+        )
+        tunnelProcess = managed
+        emitLog("Waiting for Cloudflare to register the tunnel connection. Public hostname \(configuration.cloudflareHostname) must route to this tunnel and, for token tunnels, point at http://127.0.0.1:\(configuration.port) in the Cloudflare dashboard. Command execution: \(configuration.enableCommands ? "enabled" : "disabled").\n")
+    }
+
+    /// Tunnel tokens are long base64 blobs; anything short that looks like a name or UUID is a CLI tunnel.
+    static func isCloudflareTunnelName(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard (1...100).contains(bytes.count), let first = bytes.first else { return false }
+        func isAlphaNumeric(_ byte: UInt8) -> Bool {
+            (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+        }
+        guard isAlphaNumeric(first) else { return false }
+        return bytes.allSatisfy { isAlphaNumeric($0) || $0 == 46 || $0 == 95 || $0 == 45 }
+    }
+
+    private func writeCloudflaredConfig(_ configuration: LocalMCPConfiguration) throws -> String {
+        let directory = try tunnelProfileDirectory()
+        let path = (directory as NSString).appendingPathComponent("cloudflared-\(configuration.profile).yml")
+        // Hostname, port and profile are validated before this point, so plain interpolation is safe.
+        let config = """
+        ingress:
+          - hostname: \(configuration.cloudflareHostname)
+            service: http://127.0.0.1:\(configuration.port)
+          - service: http_status:404
+
+        """
+        guard FileManager.default.createFile(
+            atPath: path,
+            contents: Data(config.utf8),
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw NSError(
+                domain: "FileMCP",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not write the cloudflared config file."]
+            )
+        }
+        return path
+    }
+
+    private func writeCloudflaredTokenFile(_ configuration: LocalMCPConfiguration) throws -> String {
+        removeCloudflaredTokenFile()
+        let directory = try tunnelProfileDirectory()
+        let path = (directory as NSString).appendingPathComponent("cloudflared-\(configuration.profile).token")
+        try? FileManager.default.removeItem(atPath: path)
+        guard FileManager.default.createFile(
+            atPath: path,
+            contents: Data(configuration.cloudflareToken.utf8),
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw NSError(
+                domain: "FileMCP",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not write the cloudflared token file."]
+            )
+        }
+        cloudflaredTokenFile = path
+        return path
+    }
+
+    /// Runs on `queue`.
+    private func removeCloudflaredTokenFile() {
+        guard let path = cloudflaredTokenFile else { return }
+        try? FileManager.default.removeItem(atPath: path)
+        cloudflaredTokenFile = nil
+    }
+
+    private func recordOutput(_ text: String) {
+        let lines = text.split(whereSeparator: { $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return }
+        recentOutputLock.lock()
+        recentOutputLines = Array((recentOutputLines + lines).suffix(5))
+        recentOutputLock.unlock()
+    }
+
+    private func lastOutputLine() -> String? {
+        recentOutputLock.lock()
+        defer { recentOutputLock.unlock() }
+        guard let line = recentOutputLines.last else { return nil }
+        return String(line.prefix(300))
+    }
+
     private func tunnelDidExit(exitCode: Int32) {
         tunnelProcess = nil
+        removeCloudflaredTokenFile()
         server?.stop()
         server = nil
         profileLock?.release()
@@ -298,13 +488,17 @@ final class LocalMCPRuntime {
             setState(.stopped)
             emitLog("Tunnel stopped.\n")
         } else {
-            let message = "Tunnel stopped unexpectedly (exit status \(exitCode))."
+            var message = "Tunnel stopped unexpectedly (exit status \(exitCode))."
+            if let detail = lastOutputLine() {
+                message += " Last output: \(detail)"
+            }
             setState(.failed(message))
             emitLog(message + "\n")
         }
     }
 
     private func finishStop() {
+        removeCloudflaredTokenFile()
         server?.stop()
         server = nil
         tunnelProcess = nil
@@ -328,12 +522,23 @@ final class LocalMCPRuntime {
     }
 
     private func validateConfiguration(_ configuration: LocalMCPConfiguration) throws -> String {
-        let requiredValues = [
-            ("Tunnel ID", configuration.tunnelID),
-            ("Runtime API key", configuration.apiKey),
-            ("Profile", configuration.profile),
-            ("Shared directory", configuration.allowedDirectory),
-        ]
+        let requiredValues: [(String, String)]
+        switch configuration.provider {
+        case .openAI:
+            requiredValues = [
+                ("Tunnel ID", configuration.tunnelID),
+                ("Runtime API key", configuration.apiKey),
+                ("Profile", configuration.profile),
+                ("Shared directory", configuration.allowedDirectory),
+            ]
+        case .cloudflare:
+            requiredValues = [
+                ("Cloudflare tunnel token or name", configuration.cloudflareToken),
+                ("Public hostname", configuration.cloudflareHostname),
+                ("Profile", configuration.profile),
+                ("Shared directory", configuration.allowedDirectory),
+            ]
+        }
         for (label, value) in requiredValues where value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw NSError(
                 domain: "FileMCP",
@@ -341,7 +546,23 @@ final class LocalMCPRuntime {
                 userInfo: [NSLocalizedDescriptionKey: "\(label) cannot be empty."]
             )
         }
-        guard Self.isValidTunnelID(configuration.tunnelID) else {
+        if configuration.provider == .cloudflare {
+            guard Self.isValidPublicHostname(configuration.cloudflareHostname) else {
+                throw NSError(
+                    domain: "FileMCP",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Public hostname must be a bare hostname such as mcp.example.com (no scheme, port or path)."]
+                )
+            }
+            guard configuration.cloudflarePathSecret.utf8.count >= 32,
+                  configuration.cloudflarePathSecret.utf8.allSatisfy(LocalMCPServer.isURLSafeSecretByte) else {
+                throw NSError(
+                    domain: "FileMCP",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "The MCP connection credential is missing or too short. Reset it in the Connection tab."]
+                )
+            }
+        } else if !Self.isValidTunnelID(configuration.tunnelID) {
             throw NSError(
                 domain: "FileMCP",
                 code: 1,
@@ -372,12 +593,29 @@ final class LocalMCPRuntime {
         return healthAddress
     }
 
+    static func canonicalWorkspacePath(_ value: String) -> String {
+        let expanded = (value as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     static func isValidTunnelID(_ value: String) -> Bool {
         let bytes = Array(value.utf8)
         let prefix = Array("tunnel_".utf8)
         guard bytes.count == prefix.count + 32, bytes.starts(with: prefix) else { return false }
         return bytes.dropFirst(prefix.count).allSatisfy { byte in
             (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 122)
+        }
+    }
+
+    static func isValidPublicHostname(_ value: String) -> Bool {
+        let labels = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard value.utf8.count <= 253, labels.count >= 2 else { return false }
+        return labels.allSatisfy { label in
+            let bytes = Array(label.utf8)
+            guard (1...63).contains(bytes.count), bytes.first != 45, bytes.last != 45 else { return false }
+            return bytes.allSatisfy { byte in
+                (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 45
+            }
         }
     }
 
@@ -459,6 +697,13 @@ final class LocalMCPRuntime {
     }
 
     private func tunnelClientEnvironment(apiKey: String, localAuthToken: String) -> [String: String] {
+        var environment = Self.baseTunnelEnvironment()
+        environment["CONTROL_PLANE_API_KEY"] = apiKey
+        environment["FILEMCP_LOCAL_AUTH_TOKEN"] = localAuthToken
+        return environment
+    }
+
+    static func baseTunnelEnvironment() -> [String: String] {
         let inherited = ProcessInfo.processInfo.environment
         let passThroughKeys = [
             "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
@@ -483,9 +728,13 @@ final class LocalMCPRuntime {
         let noProxy = noProxyEntries.joined(separator: ",")
         environment["NO_PROXY"] = noProxy
         environment["no_proxy"] = noProxy
-        environment["CONTROL_PLANE_API_KEY"] = apiKey
-        environment["FILEMCP_LOCAL_AUTH_TOKEN"] = localAuthToken
         return environment
+    }
+
+    static func defaultTunnelProfilesDirectory() -> URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("FileMCP", isDirectory: true)
+            .appendingPathComponent("tunnel-profiles", isDirectory: true)
     }
 
     private func tunnelProfileDirectory() throws -> String {
@@ -493,19 +742,14 @@ final class LocalMCPRuntime {
         if let profileDirectoryOverride {
             directory = profileDirectoryOverride.standardizedFileURL
         } else {
-            guard let applicationSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first else {
+            guard let defaultDirectory = Self.defaultTunnelProfilesDirectory() else {
                 throw NSError(
                     domain: "FileMCP",
                     code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "Could not locate the user Application Support directory."]
                 )
             }
-            directory = applicationSupport
-                .appendingPathComponent("FileMCP", isDirectory: true)
-                .appendingPathComponent("tunnel-profiles", isDirectory: true)
+            directory = defaultDirectory
         }
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -582,5 +826,239 @@ final class LocalMCPRuntime {
     private func isFailedState(_ state: LocalMCPRuntimeState) -> Bool {
         if case .failed = state { return true }
         return false
+    }
+}
+
+struct CloudflareTunnelInfo: Equatable {
+    let id: String
+    let name: String
+}
+
+/// Thin wrapper over the `cloudflared tunnel …` management commands used by the Connection tab.
+enum CloudflareCLI {
+    static func locate() throws -> String {
+        let fileManager = FileManager.default
+        let executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        var candidates = [executableURL.deletingLastPathComponent().appendingPathComponent("cloudflared").path]
+        if let override = ProcessInfo.processInfo.environment["MCP_CLOUDFLARED"] {
+            candidates.append(override)
+        }
+        // GUI apps get a minimal PATH, so also look in the usual install locations.
+        candidates += ["/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"]
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            // Relative entries (".", "bin") would resolve against the current directory.
+            candidates += path.split(separator: ":").filter { $0.hasPrefix("/") }.map { "\($0)/cloudflared" }
+        }
+        if let found = candidates.first(where: { fileManager.isExecutableFile(atPath: $0) }) {
+            return found
+        }
+        throw error("cloudflared was not found. Install it (brew install cloudflared) or set MCP_CLOUDFLARED to its path.")
+    }
+
+    /// `--token-file` arrived in newer cloudflared releases; older ones reject unknown flags.
+    static func supportsTokenFile(_ executable: String, shouldCancel: (() -> Bool)? = nil) -> Bool {
+        guard let result = try? ProcessRunner.run(
+            executable: executable,
+            arguments: ["tunnel", "run", "--help"],
+            environment: LocalMCPRuntime.baseTunnelEnvironment(),
+            timeoutSeconds: 10,
+            outputLimitBytes: 250_000,
+            shouldCancel: shouldCancel
+        ) else { return false }
+        return (result.stdout + result.stderr).contains("--token-file")
+    }
+
+    /// `cloudflared tunnel login` stores an origin certificate here; management commands need it.
+    static func originCertPath() -> String? {
+        if let custom = ProcessInfo.processInfo.environment["TUNNEL_ORIGIN_CERT"], !custom.isEmpty {
+            return FileManager.default.fileExists(atPath: custom) ? custom : nil
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [".cloudflared", ".cloudflare-warp", "cloudflare-warp"]
+            .map { home.appendingPathComponent($0).appendingPathComponent("cert.pem").path }
+            .first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    static func isLoggedIn() -> Bool {
+        originCertPath() != nil
+    }
+
+    /// Opens the browser authorization flow and blocks until it completes, is cancelled or times out.
+    /// cloudflared refuses to overwrite an existing certificate, so switching accounts first moves the
+    /// current one aside; it is restored if no new certificate is written. Returns the backup path, if any.
+    @discardableResult
+    static func login(replacingExisting: Bool = false, shouldCancel: (() -> Bool)? = nil) throws -> String? {
+        guard let existing = originCertPath() else {
+            try runLogin(shouldCancel: shouldCancel)
+            return nil
+        }
+        guard replacingExisting else { return nil }
+
+        let fileManager = FileManager.default
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let stem = "\(existing).bak-\(formatter.string(from: Date()))"
+        var backup = stem
+        var suffix = 2
+        while fileManager.fileExists(atPath: backup) {
+            backup = "\(stem)-\(suffix)"
+            suffix += 1
+        }
+        try fileManager.moveItem(atPath: existing, toPath: backup)
+        do {
+            try runLogin(shouldCancel: shouldCancel)
+        } catch {
+            // Restore the previous login unless a new certificate took its place.
+            if !fileManager.fileExists(atPath: existing) {
+                try? fileManager.moveItem(atPath: backup, toPath: existing)
+            }
+            throw error
+        }
+        return backup
+    }
+
+    private static func runLogin(shouldCancel: (() -> Bool)?) throws {
+        let output = try run(["tunnel", "login"], timeoutSeconds: 600, shouldCancel: shouldCancel)
+        // cloudflared exits 0 without logging in when another certificate already exists.
+        guard isLoggedIn(), !output.contains("existing certificate") else {
+            let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw error("cloudflared did not save a login certificate." + (detail.isEmpty ? "" : " \(detail.suffix(400))"))
+        }
+    }
+
+    static func isCancellation(_ error: Error) -> Bool {
+        (error as? CocoaError)?.code == .userCancelled
+    }
+
+    static func listTunnels(shouldCancel: (() -> Bool)? = nil) throws -> [CloudflareTunnelInfo] {
+        let output = try run(["tunnel", "list", "--output", "json"], timeoutSeconds: 30, shouldCancel: shouldCancel)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "null" else { return [] }
+        guard let data = trimmed.data(using: .utf8),
+              let items = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw error("Could not parse the cloudflared tunnel list.")
+        }
+        return items.compactMap { item in
+            guard let id = item["id"] as? String, let name = item["name"] as? String else { return nil }
+            return CloudflareTunnelInfo(id: id, name: name)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    @discardableResult
+    static func createTunnel(name: String) throws -> CloudflareTunnelInfo {
+        guard LocalMCPRuntime.isCloudflareTunnelName(name) else {
+            throw error("Tunnel name must start with a letter or number and contain only letters, numbers, '.', '_' or '-' (maximum 100 characters).")
+        }
+        if try listTunnels().contains(where: { $0.name == name }) {
+            throw error("A tunnel named \(name) already exists. Select it from the list instead.")
+        }
+        _ = try run(["tunnel", "create", name], timeoutSeconds: 60)
+        guard let created = try listTunnels().first(where: { $0.name == name }) else {
+            throw error("cloudflared reported success but the tunnel \(name) is not in the tunnel list.")
+        }
+        return created
+    }
+
+    /// Deletes the tunnel and its local credentials file. Does not touch DNS records.
+    static func deleteTunnel(name: String) throws {
+        guard LocalMCPRuntime.isCloudflareTunnelName(name) else {
+            throw error("Invalid tunnel name.")
+        }
+        guard try listTunnels().contains(where: { $0.name == name }) else {
+            throw error("No tunnel named \(name) exists in this Cloudflare account.")
+        }
+        // -f also clears stale connections that would otherwise block deletion.
+        _ = try run(["tunnel", "delete", "-f", name], timeoutSeconds: 60)
+    }
+
+    static func routeDNS(tunnel: String, hostname: String) throws {
+        guard LocalMCPRuntime.isValidPublicHostname(hostname) else {
+            throw error("Public hostname must be a bare hostname such as mcp.example.com.")
+        }
+        _ = try run(["tunnel", "route", "dns", tunnel, hostname], timeoutSeconds: 60)
+    }
+
+    static func environment() -> [String: String] {
+        var environment = LocalMCPRuntime.baseTunnelEnvironment()
+        if let certificate = originCertPath() {
+            environment["TUNNEL_ORIGIN_CERT"] = certificate
+        } else if let custom = ProcessInfo.processInfo.environment["TUNNEL_ORIGIN_CERT"], !custom.isEmpty {
+            // Login needs the destination even before the certificate exists.
+            environment["TUNNEL_ORIGIN_CERT"] = custom
+        }
+        return environment
+    }
+
+    static func localCredentialsPath(for tunnel: CloudflareTunnelInfo) -> String? {
+        guard let id = UUID(uuidString: tunnel.id)?.uuidString.lowercased() else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var directories = [".cloudflared", ".cloudflare-warp", "cloudflare-warp"]
+            .map { home.appendingPathComponent($0).path }
+        if let certificate = originCertPath() {
+            directories.insert((certificate as NSString).deletingLastPathComponent, at: 0)
+        }
+        return directories.map { ($0 as NSString).appendingPathComponent("\(id).json") }
+            .first { FileManager.default.isReadableFile(atPath: $0) }
+    }
+
+    static func credentialsPath(tunnel reference: String, shouldCancel: (() -> Bool)? = nil) throws -> String {
+        let tunnel: CloudflareTunnelInfo
+        if UUID(uuidString: reference) != nil {
+            // UUIDs can run with local credentials even without an account certificate.
+            tunnel = CloudflareTunnelInfo(id: reference, name: reference)
+        } else if let found = try listTunnels(shouldCancel: shouldCancel).first(where: { $0.name == reference }) {
+            tunnel = found
+        } else {
+            throw error("No tunnel named \(reference) exists in this Cloudflare account.")
+        }
+        guard let path = localCredentialsPath(for: tunnel) else {
+            throw error("Tunnel \(tunnel.name) has no local credentials on this Mac. Use the dashboard token provider, or select a tunnel created on this Mac.")
+        }
+        return path
+    }
+
+    private static func run(_ arguments: [String], timeoutSeconds: Int, shouldCancel: (() -> Bool)? = nil) throws -> String {
+        let environment = environment()
+        let result = try ProcessRunner.run(
+            executable: try locate(),
+            arguments: arguments,
+            environment: environment,
+            timeoutSeconds: timeoutSeconds,
+            outputLimitBytes: 250_000,
+            maxTimeoutSeconds: timeoutSeconds,
+            shouldCancel: shouldCancel
+        )
+        let operation = "cloudflared " + arguments.prefix(arguments.first == "tunnel" ? 2 : 1).joined(separator: " ")
+        if shouldCancel?() == true { throw CocoaError(.userCancelled) }
+        if result.timedOut { throw error("\(operation) timed out.") }
+        guard result.exitCode == 0 else {
+            let detail = [result.stderr, result.stdout]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty } ?? "exit status \(result.exitCode)"
+            throw error("\(operation) failed: \(String(detail.suffix(600)))")
+        }
+        return result.stdout
+    }
+
+    private static func error(_ message: String) -> NSError {
+        NSError(domain: "FileMCP", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// cloudflared output may split a registration message across pipe reads.
+final class CloudflareConnectionMonitor {
+    private let lock = NSLock()
+    private var tail = ""
+    private var connected = false
+
+    func consume(_ text: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !connected else { return false }
+        let combined = tail + text
+        connected = combined.contains("Registered tunnel connection")
+        tail = String(combined.suffix(64))
+        return connected
     }
 }

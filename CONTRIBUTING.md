@@ -15,6 +15,10 @@ Build and test:
 ```bash
 ./build_macos_app.sh
 ./tests/test_swift_runtime.sh
+bash tests/test_swift_ui.sh
+bash tests/test_swift_agent_tools.sh
+# Install Gitleaks before running this publication check:
+bash tests/check_secrets.sh
 ```
 
 For a quicker parser-fuzz pass while developing:
