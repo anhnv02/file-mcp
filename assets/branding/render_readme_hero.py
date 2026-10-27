@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the public repository README hero using the checked-in FileMCP app icon.
+"""Render the README hero using the checked-in FileMCP app icon.
 
 Requires Pillow only for explicitly regenerating this documentation graphic.
 Run from the repository root:

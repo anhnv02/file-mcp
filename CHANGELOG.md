@@ -4,13 +4,17 @@ All notable changes will be documented in this file from the first public releas
 
 ## Unreleased
 
+- Added a compact macOS workspace overview, top navigation and a persistent light/dark appearance toggle.
+- Improved connection-action contrast, workspace alignment and layout regression coverage across tabs, providers and runtime states.
+- Updated setup documentation and added native screenshots for all macOS screens in light and dark appearance.
+
 - Simplified Connection with an active-session summary, full-width MCP endpoint, grouped copy actions and collapsible Cloudflare management.
 
 - Redesigned the OAuth login page with responsive light/dark styling, accessible code entry and explicit access details; styles use a per-response CSP nonce.
 
 ### Added
 
-- Optional Cloudflare Tunnel provider (macOS): run `cloudflared` with a tunnel token and a public hostname instead of the OpenAI Secure MCP Tunnel, authenticated by a Keychain-stored secret in the MCP URL path.
+- Optional Cloudflare Tunnel provider (macOS): use a dashboard token or locally authenticated named tunnel with a public hostname. OAuth is the default; the legacy secret-URL mode is opt-in.
 - Open-source project license and contribution/security documentation.
 - GitHub Actions macOS and Windows CI verification.
 - Reproducible source-archive packaging from tracked Git content only.

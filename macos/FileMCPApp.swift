@@ -4,23 +4,35 @@ import Security
 private let appName = "FileMCP"
 
 private enum Layout {
-    static let windowWidth: CGFloat = 560
+    static let windowWidth: CGFloat = 620
     static let collapsedWindowHeight: CGFloat = 570
     static let expandedWindowHeight: CGFloat = 750
     static let openAIConnectionWindowHeight: CGFloat = 530
     static let cloudflareConnectionWindowHeight: CGFloat = 750
     static let cloudflareTokenConnectionWindowHeight: CGFloat = 675
-    static let footerHeight: CGFloat = 84
-    static let contentWidth: CGFloat = 512
+    static let footerHeight: CGFloat = 72
+    static let contentWidth: CGFloat = 572
     static let labelWidth: CGFloat = 120
-    static let fieldWidth: CGFloat = 384
-    static let directoryFieldWidth: CGFloat = 332
+    static let fieldWidth: CGFloat = 444
+    static let directoryFieldWidth: CGFloat = 392
     static let directoryButtonWidth: CGFloat = 44
     static let actionButtonHeight: CGFloat = 34
+    static let actionColor = NSColor(srgbRed: 0.71, green: 0.05, blue: 0.16, alpha: 1)
 }
 
 private final class TopAlignedDocumentView: NSView {
     override var isFlipped: Bool { true }
+}
+
+private final class ConnectionButtonCell: NSButtonCell {
+    override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
+        // Native tinted bezels turn gray in an inactive window, which hides white text.
+        let color = (controlView as? NSButton)?.bezelColor ?? Layout.actionColor
+        let fill = (!isEnabled || isHighlighted)
+            ? (color.blended(withFraction: 0.2, of: .black) ?? color) : color
+        fill.setFill()
+        NSBezierPath(roundedRect: frame.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8).fill()
+    }
 }
 
 private enum ConfigKey {
@@ -404,6 +416,15 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
     private let advancedSettingsGroup = NSStackView()
     private let apiKeyStatusLabel = NSTextField(labelWithString: "")
     private let tabs = NSTabView()
+    private let navigation = NSSegmentedControl(labels: ["Overview", "Workspace", "Connection", "Activity"], trackingMode: .selectOne, target: nil, action: nil)
+    private let themeButton = NSButton()
+    private static let appearanceKey = "interfaceAppearance"
+    private var usesDarkAppearance = false
+    private let overviewDirectoryLabel = NSTextField(labelWithString: "Choose a workspace")
+    private let overviewPermissionsLabel = NSTextField(wrappingLabelWithString: "Read, edit & delete files. Shell off. Git push off. Codex history off.")
+    private let overviewProviderLabel = NSTextField(labelWithString: "OpenAI Secure MCP Tunnel")
+    private let overviewLocalLabel = NSTextField(labelWithString: "Local MCP server · port 8008")
+    private let overviewChangeButton = NSButton(title: "Change…", target: nil, action: nil)
     private var connectionFormView: NSStackView?
     private var connectionSaveView: NSStackView?
     private var connectionKeyView: NSStackView?
@@ -428,6 +449,8 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             loadConfiguration()
             configureRuntime()
         }
+        applyAppearance((loadsSavedConfiguration ? UserDefaults.standard.string(forKey: Self.appearanceKey) : nil)
+            .map { $0 == "dark" } ?? (view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua))
     }
 
     deinit {
@@ -513,6 +536,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         configure(profileField, placeholder: "filemcp")
         profileField.toolTip = "Starts with a letter or number; use only letters, numbers, '.', '_' or '-' (maximum 128 characters)."
         configure(portField, placeholder: "8008")
+        portField.delegate = self
         configure(directoryField, placeholder: "Choose a shared directory")
         configure(healthAddressField, placeholder: "127.0.0.1:0")
         healthAddressField.toolTip = "Loopback-only tunnel-client health/admin listener. Use port 0 for an ephemeral port."
@@ -544,6 +568,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         logScroll.borderType = .bezelBorder
         logScroll.documentView = logView
 
+        startButton.cell = ConnectionButtonCell(textCell: startButton.title)
         startButton.target = self
         startButton.action = #selector(startTunnel)
         startButton.keyEquivalent = "\r"
@@ -770,7 +795,10 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         activeConnectionSummary.preferredMaxLayoutWidth = Layout.contentWidth
         activeConnectionSummary.widthAnchor.constraint(equalToConstant: Layout.contentWidth).isActive = true
         activeConnectionSummary.isHidden = true
+        let connectionTitle = NSTextField(labelWithString: "Connection")
+        connectionTitle.font = .systemFont(ofSize: 22, weight: .semibold)
         let connectionRoot = NSStackView(views: [
+            connectionTitle,
             connectionHelpLabel,
             activeConnectionSummary,
             connectionForm,
@@ -828,7 +856,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
 
         enableCommandsCheckbox.toolTip = "Allow FileMCP to run shell/CLI commands with the current macOS user's permissions."
         let commandWarning = NSTextField(wrappingLabelWithString: "Allows ChatGPT to run shell/CLI commands with the current macOS user's permissions. Enable only for workspaces you trust.")
-        commandWarning.font = .systemFont(ofSize: 10)
+        commandWarning.font = .systemFont(ofSize: 12)
         commandWarning.textColor = .secondaryLabelColor
         commandWarning.maximumNumberOfLines = 0
         commandWarning.preferredMaxLayoutWidth = Layout.contentWidth
@@ -870,7 +898,10 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         directoryField.delegate = self
         enableCommandsCheckbox.target = self
         enableCommandsCheckbox.action = #selector(workspaceOptionsChanged)
+        let workspaceTitle = NSTextField(labelWithString: "Workspace & access")
+        workspaceTitle.font = .systemFont(ofSize: 22, weight: .semibold)
         let settingsForm = NSStackView(views: [
+            workspaceTitle,
             workspaceHelp,
             directoryRow,
             enableCommandsCheckbox,
@@ -949,7 +980,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             logScroll.bottomAnchor.constraint(equalTo: logPage.bottomAnchor, constant: -12),
         ])
 
-        tabs.tabViewType = .topTabsBezelBorder
+        tabs.tabViewType = .noTabsNoBorder
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabs.delegate = self
 
@@ -965,8 +996,12 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         logTab.label = "Activity"
         logTab.view = logPage
 
-        tabs.addTabViewItem(configTab)
+        let overviewTab = NSTabViewItem(identifier: "overview")
+        overviewTab.label = "Overview"
+        overviewTab.view = buildOverview()
+        tabs.addTabViewItem(overviewTab)
         tabs.addTabViewItem(settingsTab)
+        tabs.addTabViewItem(configTab)
         tabs.addTabViewItem(logTab)
 
         let footerDivider = NSBox()
@@ -995,43 +1030,32 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         footer.addSubview(footerDivider)
         footer.addSubview(statusRow)
 
-        let workspaceIcon = NSImageView()
-        workspaceIcon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Shared workspace")
-        workspaceIcon.contentTintColor = .secondaryLabelColor
-        workspaceIcon.translatesAutoresizingMaskIntoConstraints = false
-        workspaceSummaryLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        workspaceSummaryLabel.textColor = .labelColor
-        workspaceSummaryLabel.lineBreakMode = .byTruncatingMiddle
-        workspaceSummaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        workspaceSummaryLabel.setAccessibilityLabel("Shared workspace")
-        workspaceAccessLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        workspaceAccessLabel.textColor = .secondaryLabelColor
-        workspaceAccessLabel.translatesAutoresizingMaskIntoConstraints = false
-        workspaceAccessLabel.setContentHuggingPriority(.required, for: .horizontal)
-        let accessBadge = NSBox()
-        accessBadge.boxType = .custom
-        accessBadge.titlePosition = .noTitle
-        accessBadge.setContentHuggingPriority(.required, for: .horizontal)
-        accessBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
-        accessBadge.borderWidth = 0
-        accessBadge.fillColor = .controlBackgroundColor
-        accessBadge.cornerRadius = 6
-        accessBadge.contentViewMargins = .zero
-        accessBadge.translatesAutoresizingMaskIntoConstraints = false
-        accessBadge.contentView!.addSubview(workspaceAccessLabel)
-        NSLayoutConstraint.activate([
-            workspaceIcon.widthAnchor.constraint(equalToConstant: 18),
-            workspaceIcon.heightAnchor.constraint(equalToConstant: 18),
-            workspaceAccessLabel.leadingAnchor.constraint(equalTo: accessBadge.contentView!.leadingAnchor, constant: 9),
-            workspaceAccessLabel.trailingAnchor.constraint(equalTo: accessBadge.contentView!.trailingAnchor, constant: -9),
-            workspaceAccessLabel.topAnchor.constraint(equalTo: accessBadge.contentView!.topAnchor, constant: 5),
-            workspaceAccessLabel.bottomAnchor.constraint(equalTo: accessBadge.contentView!.bottomAnchor, constant: -5),
-        ])
-        let header = NSStackView(views: [workspaceIcon, workspaceSummaryLabel, NSView(), accessBadge])
+        let appIcon = NSImageView()
+        appIcon.image = NSImage(named: NSImage.Name("AppIcon")) ?? NSImage(named: NSImage.applicationIconName)
+        appIcon.imageScaling = .scaleProportionallyUpOrDown
+        appIcon.translatesAutoresizingMaskIntoConstraints = false
+        appIcon.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        appIcon.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        let appTitle = NSTextField(labelWithString: appName)
+        appTitle.font = .systemFont(ofSize: 17, weight: .semibold)
+        themeButton.bezelStyle = .rounded
+        themeButton.target = self
+        themeButton.action = #selector(toggleAppearance)
+        themeButton.imagePosition = .imageLeading
+        themeButton.setAccessibilityIdentifier("appearance-toggle")
+        let header = NSStackView(views: [appIcon, appTitle, NSView(), themeButton])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 10
         header.translatesAutoresizingMaskIntoConstraints = false
+        navigation.target = self
+        navigation.action = #selector(navigate)
+        navigation.segmentStyle = .rounded
+        navigation.segmentDistribution = .fillEqually
+        navigation.selectedSegment = 0
+        navigation.controlSize = .regular
+        navigation.translatesAutoresizingMaskIntoConstraints = false
+        navigation.setAccessibilityLabel("App sections")
         feedbackLabel.font = .systemFont(ofSize: 12)
         feedbackLabel.maximumNumberOfLines = 3
         feedbackLabel.preferredMaxLayoutWidth = Layout.contentWidth - 110
@@ -1047,15 +1071,20 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         feedbackRow.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
         view.addSubview(feedbackRow)
+        view.addSubview(navigation)
         view.addSubview(tabs)
         view.addSubview(footer)
         NSLayoutConstraint.activate([
-            tabs.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            tabs.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            tabs.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            tabs.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             header.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
-            tabs.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
+            navigation.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
+            navigation.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            navigation.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            navigation.heightAnchor.constraint(equalToConstant: 30),
+            tabs.topAnchor.constraint(equalTo: navigation.bottomAnchor, constant: 10),
             tabs.bottomAnchor.constraint(equalTo: feedbackRow.topAnchor, constant: -8),
             feedbackRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             feedbackRow.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
@@ -1094,6 +1123,165 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             gitUserNameField.widthAnchor.constraint(equalToConstant: Layout.fieldWidth),
             gitUserEmailField.widthAnchor.constraint(equalToConstant: Layout.fieldWidth),
         ])
+    }
+
+    private func buildOverview() -> NSView {
+        func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular) -> NSTextField {
+            let field = NSTextField(wrappingLabelWithString: text)
+            field.font = .systemFont(ofSize: size, weight: weight)
+            field.preferredMaxLayoutWidth = Layout.contentWidth - 40
+            return field
+        }
+        func column(_ views: [NSView], spacing: CGFloat = 10) -> NSStackView {
+            let stack = NSStackView(views: views)
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = spacing
+            return stack
+        }
+        func panel(_ stack: NSStackView) -> NSBox {
+            let box = NSBox()
+            box.boxType = .custom
+            box.titlePosition = .noTitle
+            box.fillColor = .controlBackgroundColor
+            box.borderColor = .separatorColor
+            box.borderWidth = 1
+            box.cornerRadius = 10
+            box.contentViewMargins = .zero
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            box.contentView!.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: box.contentView!.leadingAnchor, constant: 14),
+                stack.trailingAnchor.constraint(equalTo: box.contentView!.trailingAnchor, constant: -14),
+                stack.topAnchor.constraint(equalTo: box.contentView!.topAnchor, constant: 14),
+                stack.bottomAnchor.constraint(equalTo: box.contentView!.bottomAnchor, constant: -14),
+                box.widthAnchor.constraint(equalToConstant: Layout.contentWidth),
+            ])
+            return box
+        }
+        let title = label("Workspace overview", size: 19, weight: .semibold)
+        workspaceSummaryLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        workspaceSummaryLabel.lineBreakMode = .byTruncatingMiddle
+        workspaceSummaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        overviewDirectoryLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        overviewDirectoryLabel.textColor = .secondaryLabelColor
+        overviewDirectoryLabel.lineBreakMode = .byTruncatingMiddle
+        overviewDirectoryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        overviewDirectoryLabel.setAccessibilityLabel("Shared directory path")
+        let folderIcon = NSImageView()
+        folderIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Shared workspace")
+        folderIcon.contentTintColor = .systemRed
+        folderIcon.translatesAutoresizingMaskIntoConstraints = false
+        folderIcon.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        folderIcon.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        overviewChangeButton.bezelStyle = .rounded
+        overviewChangeButton.target = self
+        overviewChangeButton.action = #selector(openWorkspace)
+        let folderText = column([workspaceSummaryLabel, overviewDirectoryLabel], spacing: 4)
+        folderText.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let folderRow = NSStackView(views: [folderIcon, folderText, overviewChangeButton])
+        folderRow.alignment = .centerY
+        folderRow.distribution = .fill
+        folderRow.spacing = 12
+        overviewChangeButton.setContentHuggingPriority(.required, for: .horizontal)
+        folderRow.widthAnchor.constraint(equalToConstant: Layout.contentWidth - 28).isActive = true
+        let divider = NSBox()
+        divider.boxType = .separator
+        overviewPermissionsLabel.font = .systemFont(ofSize: 12)
+        overviewPermissionsLabel.textColor = .secondaryLabelColor
+        overviewPermissionsLabel.preferredMaxLayoutWidth = Layout.contentWidth - 28
+        overviewPermissionsLabel.widthAnchor.constraint(equalToConstant: Layout.contentWidth - 28).isActive = true
+        let workspacePanel = panel(column([folderRow, divider, overviewPermissionsLabel], spacing: 10))
+        let localTitle = label("This Mac", weight: .semibold)
+        overviewLocalLabel.font = .systemFont(ofSize: 12)
+        overviewLocalLabel.textColor = .secondaryLabelColor
+        overviewProviderLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        overviewProviderLabel.lineBreakMode = .byTruncatingTail
+        overviewProviderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let providerHelp = label("Manage in Connection", size: 12)
+        providerHelp.textColor = .secondaryLabelColor
+        let route = NSStackView(views: [column([localTitle, overviewLocalLabel], spacing: 4),
+                                        label("→", size: 20),
+                                        column([overviewProviderLabel, providerHelp], spacing: 4)])
+        route.alignment = .centerY
+        route.spacing = 14
+        route.distribution = .fill
+        let routePanel = panel(column([route]))
+        let detailsButton = NSButton(title: "Connection details", target: self, action: #selector(openConnection))
+        detailsButton.bezelStyle = .rounded
+        let boundary = label("Only your selected folder is shared by file tools.", size: 12)
+        boundary.textColor = .secondaryLabelColor
+        let boundaryRow = NSStackView(views: [boundary, NSView(), detailsButton])
+        boundaryRow.alignment = .centerY
+        boundaryRow.spacing = 10
+        let closing = label("Closing the window keeps sharing active. Use Disconnect to stop sharing.", size: 12)
+        closing.textColor = .secondaryLabelColor
+        let stack = column([title, workspacePanel, label("Connection route", weight: .semibold),
+                            routePanel, boundaryRow, closing], spacing: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay
+        let document = TopAlignedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = document
+        document.addSubview(stack)
+        NSLayoutConstraint.activate([
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12),
+        ])
+        return scroll
+    }
+
+    @objc private func navigate() {
+        guard tabs.tabViewItems.indices.contains(navigation.selectedSegment) else { return }
+        tabs.selectTabViewItem(at: navigation.selectedSegment)
+    }
+
+    @objc private func openWorkspace() { tabs.selectTabViewItem(withIdentifier: "settings") }
+    @objc private func openConnection() { tabs.selectTabViewItem(withIdentifier: "config") }
+
+    @objc private func toggleAppearance() {
+        applyAppearance(!usesDarkAppearance)
+        if loadsSavedConfiguration {
+            UserDefaults.standard.set(usesDarkAppearance ? "dark" : "light", forKey: Self.appearanceKey)
+        }
+    }
+
+    private func applyAppearance(_ dark: Bool) {
+        usesDarkAppearance = dark
+        view.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        view.window?.appearance = view.appearance
+        if loadsSavedConfiguration { NSApp.appearance = view.appearance }
+        themeButton.title = dark ? "Light" : "Dark"
+        themeButton.image = NSImage(systemSymbolName: dark ? "sun.max" : "moon", accessibilityDescription: nil)
+        let action = dark ? "Switch to light appearance" : "Switch to dark appearance"
+        themeButton.toolTip = action
+        themeButton.setAccessibilityLabel(action)
+        refreshAppearanceColors()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.appearance = view.appearance
+    }
+
+    private func refreshAppearanceColors() {
+        // Resolve CGColors inside the selected appearance, not the system appearance.
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            shareConnectionSection.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        }
+        view.needsDisplay = true
+    }
+
+    private func updateOverviewConnection() {
+        overviewProviderLabel.stringValue = selectedProvider == .cloudflare ? "Cloudflare Tunnel" : "OpenAI Secure MCP Tunnel"
+        let port = portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        overviewLocalLabel.stringValue = "Local MCP server · port \(port.isEmpty ? "8008" : port)"
     }
 
     private func configure(_ field: NSTextField, placeholder: String) {
@@ -1195,6 +1383,8 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             updateCloudflareActionStates()
         } else if source === directoryField {
             updateWorkspaceSummary()
+        } else if source === portField {
+            updateOverviewConnection()
         }
     }
 
@@ -1240,7 +1430,8 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             ? (usesCloudflareToken ? normalizedCloudflareHostname() : cloudflareTunnelNameField.stringValue)
             : tunnelIDField.stringValue
         activeConnectionSummary.stringValue = "\(provider) · \(detail)\nDisconnect to edit connection settings."
-        shareConnectionSection.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        updateOverviewConnection()
+        refreshAppearanceColors()
         view.layoutSubtreeIfNeeded()
     }
 
@@ -1934,6 +2125,9 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
     }
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        if let item = tabViewItem, let index = tabView.tabViewItems.firstIndex(of: item) {
+            navigation.selectedSegment = index
+        }
         updateWindowHeight()
     }
 
@@ -1944,6 +2138,8 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
 
     private var desiredContentHeight: CGFloat {
         switch tabs.selectedTabViewItem?.identifier as? String {
+        case "overview":
+            return 600
         case "config":
             let minimum: CGFloat = !configurationIsEditable ? (selectedProvider == .cloudflare ? 500 : 360)
                 : (selectedProvider == .openAI ? Layout.openAIConnectionWindowHeight : 640)
@@ -1953,7 +2149,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             // feedback and fixed footer. Before attachment, reserve that same chrome.
             let viewportHeight = connectionScrollView?.contentView.bounds.height ?? 0
             let chrome = viewportHeight > 0 && view.bounds.height > viewportHeight
-                ? view.bounds.height - viewportHeight : 232
+                ? view.bounds.height - viewportHeight : 244
             return max(minimum, ceil(contentHeight + chrome))
         case "settings":
             return advancedSettingsGroup.isHidden
@@ -2010,19 +2206,19 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         switch state {
         case .stopped, .failed:
             startButton.title = "Connect"
-            startButton.bezelColor = .controlAccentColor
+            startButton.bezelColor = Layout.actionColor
             startButton.isEnabled = true
         case .starting:
             startButton.title = "Cancel connection"
-            startButton.bezelColor = .controlAccentColor
+            startButton.bezelColor = Layout.actionColor
             startButton.isEnabled = true
         case .running:
             startButton.title = "Disconnect"
-            startButton.bezelColor = .systemRed
+            startButton.bezelColor = Layout.actionColor
             startButton.isEnabled = true
         case .stopping:
             startButton.title = "Disconnecting…"
-            startButton.bezelColor = .systemRed
+            startButton.bezelColor = Layout.actionColor
             startButton.isEnabled = false
         }
         switch state {
@@ -2043,6 +2239,14 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
             connectionStatusLabel.textColor = .systemRed
         }
         startButton.contentTintColor = .white
+        // AppKit's tinted bezel does not consistently apply contentTintColor to text.
+        let buttonTitle = NSMutableParagraphStyle()
+        buttonTitle.alignment = .center
+        startButton.attributedTitle = NSAttributedString(string: startButton.title, attributes: [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .paragraphStyle: buttonTitle,
+        ])
         updateInteractionState(state)
     }
 
@@ -2059,6 +2263,7 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         allowCloudflareURLSecretCheckbox.isEnabled = configurationIsEditable && !cloudflareBusy
         providerPopup.isEnabled = configurationIsEditable && !cloudflareBusy
         chooseDirectoryButton.isEnabled = configurationIsEditable
+        overviewChangeButton.isEnabled = configurationIsEditable
         enableCommandsCheckbox.isEnabled = configurationIsEditable
         enableGitPushCheckbox.isEnabled = configurationIsEditable
         enableCodexHistoryCheckbox.isEnabled = configurationIsEditable
@@ -2108,6 +2313,13 @@ private final class MainViewController: NSViewController, NSTabViewDelegate, NST
         workspaceAccessLabel.textColor = enableCommandsCheckbox.state == .on ? .systemOrange : .secondaryLabelColor
         workspaceAccessLabel.toolTip = permissionSummary
         directoryField.toolTip = path
+        overviewDirectoryLabel.stringValue = path.isEmpty ? "Choose a folder in Workspace to get started." : path
+        overviewDirectoryLabel.toolTip = path
+        overviewPermissionsLabel.stringValue = "Read, edit & delete files. "
+            + "Shell \(enableCommandsCheckbox.state == .on ? "on" : "off"). "
+            + "Git push \(enableGitPushCheckbox.state == .on ? "on" : "off"). "
+            + "Codex history \(enableCodexHistoryCheckbox.state == .on ? "on" : "off")."
+        updateOverviewConnection()
     }
 
     private func showFeedback(_ message: String, isError: Bool = false) {

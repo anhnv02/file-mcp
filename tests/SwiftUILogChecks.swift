@@ -31,6 +31,7 @@ static func checkLogs() {
 func runLogRegressionChecks() {
     MainViewController.checkLogs()
     MainViewController.checkInterface()
+    MainViewController.checkCompactLayoutMatrix()
 }
 
 extension MainViewController {
@@ -49,6 +50,23 @@ extension MainViewController {
         controller.cloudflareTunnelNameField.stringValue = "my-workspace"
         precondition(controller.enableGitPushCheckbox.state == .off && controller.enableCodexHistoryCheckbox.state == .off)
         controller.updateWorkspaceSummary()
+        precondition(controller.tabs.selectedTabViewItem?.identifier as? String == "overview")
+        controller.navigation.selectedSegment = 2
+        controller.navigate()
+        precondition(controller.tabs.selectedTabViewItem?.identifier as? String == "config")
+        controller.applyAppearance(false)
+        precondition(controller.view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua)
+        controller.toggleAppearance()
+        precondition(controller.usesDarkAppearance && controller.themeButton.title == "Light")
+        precondition(controller.view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
+        controller.toggleAppearance()
+        precondition(!controller.usesDarkAppearance && controller.themeButton.title == "Dark")
+        precondition(controller.overviewPermissionsLabel.stringValue.contains("Shell off"))
+        controller.enableCommandsCheckbox.state = .on
+        controller.workspaceOptionsChanged()
+        precondition(controller.overviewPermissionsLabel.stringValue.contains("Shell on"))
+        controller.enableCommandsCheckbox.state = .off
+        controller.workspaceOptionsChanged()
         controller.providerPopup.selectItem(at: 0)
         controller.applyProviderSelection()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Layout.windowWidth, height: 700),
@@ -84,8 +102,10 @@ extension MainViewController {
         precondition(!controller.saveSettingsButton.isEnabled && !controller.cloudflareLoginButton.isEnabled)
         precondition(!controller.resetButton.isEnabled && controller.startButton.isEnabled)
         precondition(!controller.enableGitPushCheckbox.isEnabled && !controller.enableCodexHistoryCheckbox.isEnabled)
-        for tab in ["settings", "log", "config"] {
+        for tab in ["overview", "settings", "log", "config"] {
             controller.tabs.selectTabViewItem(withIdentifier: tab)
+            precondition(controller.navigation.selectedSegment == controller.tabs.indexOfTabViewItem(controller.tabs.selectedTabViewItem!), "Navigation follows programmatic tab selection")
+            precondition(!controller.overviewChangeButton.isEnabled && controller.themeButton.isEnabled)
             precondition(!controller.startButton.isHiddenOrHasHiddenAncestor, "Connection action must be available on every tab")
         }
         controller.updateRunButton(state: .starting)
@@ -175,5 +195,65 @@ extension MainViewController {
         window.isReleasedWhenClosed = false
         window.center()
         return window
+    }
+}
+
+extension MainViewController {
+    static func checkCompactLayoutMatrix() {
+        let window = previewInterface()
+        let controller = window.contentViewController as! MainViewController
+        controller.directoryField.stringValue = "/Users/demo/" + String(repeating: "Thư mục có tên dài/", count: 15) + "workspace"
+        controller.updateWorkspaceSummary()
+        controller.tunnelIDField.stringValue = "tunnel_0123456789abcdef0123456789abcdef"
+        let states: [LocalMCPRuntimeState] = [.stopped, .starting, .running, .stopping, .failed("A failed connection")]
+        var cases = 0
+        for dark in [false, true] {
+            controller.applyAppearance(dark)
+            for provider in 0...2 {
+                controller.providerPopup.selectItem(at: provider)
+                controller.applyProviderSelection()
+                for state in states {
+                    controller.updateRunButton(state: state)
+                    for tab in ["overview", "settings", "config", "log"] {
+                        controller.tabs.selectTabViewItem(withIdentifier: tab)
+                        window.setContentSize(NSSize(width: Layout.windowWidth, height: controller.preferredContentHeight))
+                        controller.view.layoutSubtreeIfNeeded()
+                        let bounds = controller.view.bounds.insetBy(dx: -1, dy: -1)
+                        for control in [controller.startButton, controller.themeButton, controller.navigation] {
+                            let rect = control.convert(control.bounds, to: controller.view)
+                            precondition(bounds.contains(rect), "Persistent control clipped: \(tab), provider \(provider), dark \(dark)")
+                        }
+                        let title = controller.startButton.attributedTitle
+                        precondition(title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .white,
+                                     "Connection action must retain white text in every state and theme")
+                        precondition(title.size().width <= controller.startButton.bounds.width - 16,
+                                     "Connection action title must fit without clipping")
+                        if let scroll = controller.tabs.selectedTabViewItem?.view as? NSScrollView,
+                           let document = scroll.documentView {
+                            precondition(document.bounds.width <= scroll.contentView.bounds.width + 1,
+                                         "Horizontal overflow: \(tab), provider \(provider)")
+                            if tab == "overview", let row = controller.overviewChangeButton.superview {
+                                let action = controller.overviewChangeButton.convert(controller.overviewChangeButton.bounds, to: row)
+                                precondition(abs(action.maxX - row.bounds.maxX) <= 2,
+                                             "Workspace action must align with the trailing edge")
+                            }
+                            if tab == "overview", controller.preferredContentHeight == 600 {
+                                precondition(document.fittingSize.height <= scroll.contentView.bounds.height + 1,
+                                             "Compact overview must fit without scrolling on a normal screen")
+                            }
+                        }
+                        cases += 1
+                    }
+                }
+            }
+        }
+        controller.directoryField.stringValue = ""
+        controller.updateWorkspaceSummary()
+        precondition(controller.workspaceSummaryLabel.stringValue == "Choose a workspace")
+        controller.portField.stringValue = "9009"
+        controller.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: controller.portField))
+        precondition(controller.overviewLocalLabel.stringValue.contains("9009"))
+        window.orderOut(nil)
+        print("PASS: \(cases) layout cases (2 appearances × 3 providers × 5 states × 4 tabs), long/empty paths, port summary and white action titles")
     }
 }

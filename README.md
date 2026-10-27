@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="assets/branding/filemcp-v2/readme-hero.png" alt="FileMCP — Your files. Your MCP. Native macOS and Windows workspace access through MCP." width="100%">
-</p>
-
-<p align="center"><strong>Your local workspace, connected to ChatGPT. On your terms.</strong></p>
+![FileMCP — Your local workspace, connected to ChatGPT. On your terms.](assets/branding/filemcp-v2/readme-header.png)
 
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-12%2B-22293A?style=flat-square&logo=apple&logoColor=white" alt="macOS 12 or later">
@@ -20,7 +16,7 @@
 
 FileMCP is a native **macOS and Windows** desktop application that gives ChatGPT controlled access to a local workspace through MCP. It can read and modify files, run Git operations, and—only when explicitly enabled—run local shell commands.
 
-The MCP server stays bound to `127.0.0.1`. FileMCP uses OpenAI [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) to make that local server available to supported OpenAI products without opening a public inbound port on your computer.
+The MCP server stays bound to `127.0.0.1`. By default, FileMCP uses OpenAI [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) to connect supported OpenAI products without a public MCP endpoint. On macOS, you can alternatively use your own Cloudflare Tunnel with a public HTTPS hostname and OAuth. Both options establish an outbound tunnel rather than opening an inbound router port.
 
 > [!WARNING]
 > FileMCP can modify or delete files inside the directory you choose. If command execution is enabled, it can also run processes with the permissions of your signed-in OS user. Use a narrowly scoped workspace and enable shell access only when you trust the workflow using it.
@@ -32,7 +28,8 @@ FileMCP is an independent open-source project. It is not an official OpenAI prod
 - Native desktop implementations:
   - **Swift + AppKit** on macOS.
   - **C# + .NET 8 + WPF** on Windows.
-- Equivalent core MCP surface on both platforms: the same filesystem, Git, Codex-history import, protocol, tunnel, and optional command-execution behavior.
+- Shared core tools on both platforms: filesystem access, Git, Codex-history import, MCP protocol support, OpenAI tunnel integration and optional command execution. Provider choices and permission controls differ; see [Application settings](#application-settings).
+- Compact macOS interface with a workspace overview, persistent connection controls and a saved light/dark appearance choice.
 - Local MCP server listens on **loopback only** (`127.0.0.1`).
 - Built-in filesystem tools are restricted to one configured workspace root; optional shell commands are not OS-sandboxed.
 - Symlink/reparse-point and canonical-path checks protect the workspace boundary.
@@ -44,6 +41,59 @@ FileMCP is an independent open-source project. It is not an official OpenAI prod
 - Process output, request sizes, search scope, and concurrency are bounded.
 - Descendant processes are cleaned up on timeout, stop, and application shutdown.
 - Official OpenAI `tunnel-client` binaries are vendored with documented provenance and checksums.
+
+## Screenshots
+
+Current native macOS interface, captured with sample settings and no live connection or real credentials. Cloudflare login status is simulated. Windows uses a separate WPF interface and is not pictured. Click any screenshot to view it at full size.
+
+<table>
+  <tr>
+    <td align="center" valign="top"><strong>Overview</strong><br><a href="assets/screenshots/macos/overview-light.png"><img src="assets/screenshots/macos/overview-light.png" alt="macOS Overview in light appearance showing the sample folder, permissions and connection route" width="290"></a></td>
+    <td align="center" valign="top"><strong>Workspace</strong><br><a href="assets/screenshots/macos/workspace-light.png"><img src="assets/screenshots/macos/workspace-light.png" alt="macOS Workspace in light appearance with file access and optional permissions" width="290"></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><strong>Connection</strong><br><a href="assets/screenshots/macos/connection-light.png"><img src="assets/screenshots/macos/connection-light.png" alt="macOS Connection in light appearance with OpenAI tunnel ID and runtime API key fields" width="290"></a></td>
+    <td align="center" valign="top"><strong>Activity</strong><br><a href="assets/screenshots/macos/activity-light.png"><img src="assets/screenshots/macos/activity-light.png" alt="macOS Activity in light appearance with the empty log state and persistent Connect action" width="290"></a></td>
+  </tr>
+</table>
+
+<details>
+<summary>Dark appearance — all four tabs</summary>
+
+<table>
+  <tr>
+    <td align="center" valign="top"><strong>Overview</strong><br><a href="assets/screenshots/macos/overview-dark.png"><img src="assets/screenshots/macos/overview-dark.png" alt="macOS Overview in dark appearance showing the sample folder, permissions and connection route" width="290"></a></td>
+    <td align="center" valign="top"><strong>Workspace</strong><br><a href="assets/screenshots/macos/workspace-dark.png"><img src="assets/screenshots/macos/workspace-dark.png" alt="macOS Workspace in dark appearance with file access and optional permissions" width="290"></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><strong>Connection</strong><br><a href="assets/screenshots/macos/connection-dark.png"><img src="assets/screenshots/macos/connection-dark.png" alt="macOS Connection in dark appearance with OpenAI tunnel ID and runtime API key fields" width="290"></a></td>
+    <td align="center" valign="top"><strong>Activity</strong><br><a href="assets/screenshots/macos/activity-dark.png"><img src="assets/screenshots/macos/activity-dark.png" alt="macOS Activity in dark appearance with the empty log state and persistent Connect action" width="290"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary>Advanced settings and Cloudflare — light and dark</summary>
+
+<table>
+  <tr>
+    <td align="center" valign="top"><strong>Workspace — Advanced options · Light</strong><br><a href="assets/screenshots/macos/workspace-advanced-light.png"><img src="assets/screenshots/macos/workspace-advanced-light.png" alt="Workspace — Advanced options in light appearance" width="290"></a></td>
+    <td align="center" valign="top"><strong>Workspace — Advanced options · Dark</strong><br><a href="assets/screenshots/macos/workspace-advanced-dark.png"><img src="assets/screenshots/macos/workspace-advanced-dark.png" alt="Workspace — Advanced options in dark appearance" width="290"></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><strong>Cloudflare — dashboard token · Light</strong><br><a href="assets/screenshots/macos/connection-cloudflare-token-light.png"><img src="assets/screenshots/macos/connection-cloudflare-token-light.png" alt="Cloudflare — dashboard token in light appearance" width="290"></a></td>
+    <td align="center" valign="top"><strong>Cloudflare — dashboard token · Dark</strong><br><a href="assets/screenshots/macos/connection-cloudflare-token-dark.png"><img src="assets/screenshots/macos/connection-cloudflare-token-dark.png" alt="Cloudflare — dashboard token in dark appearance" width="290"></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><strong>Cloudflare — cloudflared login · Light</strong><br><a href="assets/screenshots/macos/connection-cloudflare-login-light.png"><img src="assets/screenshots/macos/connection-cloudflare-login-light.png" alt="Cloudflare — cloudflared login in light appearance" width="290"></a></td>
+    <td align="center" valign="top"><strong>Cloudflare — cloudflared login · Dark</strong><br><a href="assets/screenshots/macos/connection-cloudflare-login-dark.png"><img src="assets/screenshots/macos/connection-cloudflare-login-dark.png" alt="Cloudflare — cloudflared login in dark appearance" width="290"></a></td>
+  </tr>
+</table>
+
+</details>
+
+Use the **Dark / Light** button beside the app name to switch appearance. Screenshot sources and capture notes are documented in [assets/screenshots/README.md](assets/screenshots/README.md).
 
 ## Platform support
 
@@ -57,12 +107,17 @@ The macOS build scripts understand Intel (`darwin-amd64`), but that platform is 
 
 ## Requirements
 
-Common requirements:
+For ChatGPT use:
 
-- Access to a ChatGPT plan/workspace that supports custom MCP apps. Check OpenAI's current Developer Mode/MCP documentation for plan and workspace availability.
-- A Secure MCP Tunnel configured for your OpenAI workspace.
-- A restricted Platform runtime API key whose principal has **Tunnels Read + Use** for that tunnel.
+- An account/workspace that permits custom MCP server connections. Availability and administrative permissions depend on the account and workspace; follow OpenAI's current [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 - Git installed if you want to use the built-in Git tools.
+
+Choose one connection provider:
+
+| Provider | Requirements |
+| --- | --- |
+| OpenAI Secure MCP Tunnel · macOS and Windows | A tunnel associated with the intended ChatGPT workspace, plus a restricted Platform runtime API key with **Tunnels Read + Use**. Creating or editing a tunnel requires **Tunnels Read + Manage**. See the [official tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels). |
+| Cloudflare Tunnel · macOS only | `cloudflared`, a Cloudflare tunnel and a public HTTPS hostname routed to the local server. Use a dashboard token or a locally authenticated named tunnel. This route does not require an OpenAI tunnel ID or Platform runtime key. |
 
 For development/building:
 
@@ -131,15 +186,21 @@ For a development run on Windows:
 
 ### Configure FileMCP
 
-Open the **Connection** tab and enter the Secure MCP Tunnel ID and runtime API key. The key is stored in macOS Keychain or Windows Credential Manager after it is saved.
+For the default OpenAI provider:
 
-Open **Workspace** on macOS (**Settings** on Windows) and choose the local directory that ChatGPT is allowed to access. Click **Connect** to start the local MCP server and Secure MCP Tunnel.
+1. Open **Connection** and enter the Secure MCP Tunnel ID and runtime API key. Saved keys go to macOS Keychain or Windows Credential Manager.
+2. Open **Workspace** on macOS (**Settings** on Windows) and choose the local folder to share. File tools can read, edit and delete files in that folder; additional permissions are off by default on macOS.
+3. Click **Connect** to save the current configuration and start the local server and tunnel. Wait for **Connected**, then add it to ChatGPT as described [below](#add-the-mcp-server-in-chatgpt).
 
-On macOS, the connection control is available on every tab. **Connect** saves the current settings automatically; disconnect before changing the provider or workspace. **Activity** contains runtime logs and a copy action for troubleshooting. Closing the window keeps sharing active; **Disconnect** stops sharing and **Quit FileMCP** stops the app.
+On macOS, **Overview** summarizes the selected folder, enabled permissions and connection route. Use the top navigation for **Workspace**, **Connection** and **Activity**. The **Dark / Light** button remembers your appearance choice across launches; before a choice is saved, startup uses the system appearance.
+
+The macOS connection control is available on every tab. Disconnect before changing the provider, shared folder or permissions. **Activity** contains runtime logs, follow/clear controls and a copy action for troubleshooting. On Windows, connection controls are in **Connection**, and runtime output is in **Logs**. Settings saved during an active Windows session take effect the next time it starts.
+
+Closing the window keeps sharing active. Use **Disconnect** to stop sharing or **Quit FileMCP** to stop the app.
 
 #### Alternative: Cloudflare Tunnel (macOS)
 
-Expose FileMCP through your own [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). Cloudflare support is currently macOS only; OAuth is the default authentication method.
+Expose FileMCP through your own [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). Cloudflare support is currently macOS only; OAuth is the default authentication method.
 
 1. Install `cloudflared` (`brew install cloudflared`). FileMCP looks next to the app binary, then in `MCP_CLOUDFLARED`, `/opt/homebrew/bin`, `/usr/local/bin`, and `PATH`. It is not bundled.
 2. In Cloudflare Zero Trust, create a remotely-managed tunnel and a public hostname (for example `mcp.example.com`) routing to `http://127.0.0.1:<MCP port>` (default `8008`). Route the **entire hostname**, including `/oauth/*` and `/.well-known/*`, rather than only `/mcp`.
@@ -153,9 +214,14 @@ The Cloudflare tunnel token and login code are also kept in Keychain. The tunnel
 
 **Migration:** older Cloudflare connectors using `/mcp/<secret>` must be reconfigured for OAuth. The optional **Compatibility: use a secret in the MCP URL** setting restores that legacy no-auth client flow only after an explicit warning. It is off by default and uses a separate credential from OAuth. Anyone with a compatibility URL can use the enabled tools, and external proxies or clients may log it. Prefer OAuth.
 
-### Add the MCP app in ChatGPT
+### Add the MCP server in ChatGPT
 
-Use ChatGPT Developer Mode / custom MCP app configuration for your workspace and connect it to the corresponding Secure MCP Tunnel. Availability and exact UI can vary by ChatGPT plan and workspace policy. For the current setup flow and plan-specific requirements, see OpenAI's [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461) documentation.
+Follow OpenAI's current [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt) guide. In the current Plugins interface, open **Plugins → + → Add custom MCP server**; account and workspace policies still apply.
+
+- For OpenAI Secure MCP Tunnel, choose **Tunnel** and select the configured tunnel or enter its tunnel ID.
+- For Cloudflare, enter the full HTTPS endpoint, including `/mcp`, and configure OAuth as described above.
+
+Review the connection warning and discovered tools before creating the plugin. Keep FileMCP connected while using it. Older ChatGPT interfaces may place custom MCP setup under Developer Mode; use the current official guide for your account.
 
 On macOS, the HTTP server limits active connections to 32, imposes a fixed 15-second deadline for receiving a complete request and a 15-second response-write deadline, and closes active sockets at shutdown. Tool processing has its own existing operation limits; these deadlines apply to network reads/writes.
 
@@ -163,7 +229,17 @@ FileMCP does not listen on a public network interface; the local MCP endpoint re
 
 ## Application settings
 
-The common workflow and terminology are kept aligned across macOS and Windows. Technical settings live under **Advanced options**.
+The two platforms share the core MCP tools but have different interfaces:
+
+| Interface | macOS | Windows |
+| --- | --- | --- |
+| Navigation | Overview, Workspace, Connection, Activity | Connection, Settings, Logs |
+| Connection action | Available on every tab | In Connection |
+| Appearance toggle | Saved Dark / Light choice | No in-app toggle |
+| Providers | OpenAI and Cloudflare | OpenAI |
+| Optional permissions | Shell, Git push and Codex history are separate | Shell control; no separate Git push/history switches |
+
+Technical settings live under **Advanced options**.
 
 On macOS, **Allow Git push to remote servers** and **Allow writing to Codex history** are separate Workspace permissions, both off by default. Disabled tools are omitted from the advertised list and rejected if a client calls a cached tool name. Git push can send repository content to configured remotes and use existing SSH identities. Codex history writes outside the shared folder. These switches do not sandbox shell commands: when shell access is enabled, commands retain the OS user's privileges. Windows retains its existing permission model.
 
@@ -175,8 +251,11 @@ On macOS, **Allow Git push to remote servers** and **Allow writing to Codex hist
 | Tunnel ID | Selects the OpenAI Secure MCP Tunnel; must match `tunnel_` followed by 32 lowercase letters or digits. |
 | Runtime API key | Authenticates `tunnel-client`; stored in the platform credential store. |
 | Shared directory | The only filesystem root exposed to MCP file tools. |
-| Allow shell commands | Enables `run_command`; disabled by default. |
-| Profile | FileMCP-owned `tunnel-client` profile name; letters/numbers plus `.`, `_`, `-`, maximum 128 characters. |
+| Allow shell commands | Enables `run_command` and the command-session tools; disabled by default. |
+| Allow Git push to remote servers | macOS: separately enables `git_push`; off by default. |
+| Allow writing to Codex history | macOS: separately enables `save_conversation_to_codex`; off by default. |
+| Dark / Light | macOS: changes app appearance and remembers the choice independently of connection settings. |
+| Profile | OpenAI `tunnel-client` profile name; starts with a letter or number, then letters/numbers plus `.`, `_`, `-`, maximum 128 characters. |
 | MCP port | Local loopback port used by the MCP server. |
 | Health listener | Loopback-only `tunnel-client` health/admin listener. Port `0` requests an ephemeral port. |
 | Git name / Git email | Optional Git identity used by `git_commit`. |
@@ -186,7 +265,7 @@ Closing the main window does not stop an active tunnel:
 - macOS: reopen FileMCP from the Dock.
 - Windows: FileMCP remains available in the system tray; double-click the tray icon or choose **Open FileMCP**.
 
-Use **Quit FileMCP** (or the platform quit shortcut) to terminate the app and stop the runtime.
+Use **Quit FileMCP** on macOS or the Windows tray menu **Quit FileMCP** action to terminate the app and stop the runtime.
 
 ## Available MCP tools
 
@@ -254,8 +333,9 @@ FileMCP intentionally treats the local workspace as a privileged boundary.
 ### Local networking
 
 - The MCP server binds only to `127.0.0.1`.
-- Every runtime start creates a fresh 256-bit local token. `tunnel-client` resolves that token through `env:FILEMCP_LOCAL_AUTH_TOKEN` and injects it only on requests to the local MCP origin.
-- Missing or incorrect local-auth tokens are rejected before request bodies are accepted. The only exception is a bodyless `GET` to either standard OAuth Protected Resource Metadata discovery path; because FileMCP does not advertise OAuth, those requests return `404 Not Found` without exposing workspace data. The token is not persisted in the generated tunnel profile and is redacted from FileMCP logs/errors.
+- Every runtime start creates a fresh 256-bit local token. With OpenAI Secure MCP Tunnel, `tunnel-client` resolves it through `env:FILEMCP_LOCAL_AUTH_TOKEN` and injects it on requests to the local MCP origin.
+- In OpenAI tunnel mode, missing or incorrect local-auth tokens are rejected before request bodies are accepted, except bodyless `GET` requests to the OAuth Protected Resource Metadata discovery paths. That mode does not advertise OAuth and returns `404 Not Found` for those paths. The local token is not persisted in the generated tunnel profile and is redacted from logs/errors.
+- In macOS Cloudflare OAuth mode, public discovery/authorization routes are served without the local token; MCP tool calls require a valid OAuth access token or the internal local token. The explicitly enabled legacy compatibility mode authenticates through the secret MCP URL instead. OAuth does not remove filesystem or tool-permission checks.
 - The `tunnel-client` health/admin listener is restricted to `localhost`, `127.0.0.1`, or `[::1]`; FileMCP rejects public/LAN bind addresses.
 - HTTP requires a valid `Host`, validates `Origin`, rejects malformed header names/values and inconsistent body framing, and bounds request headers/bodies.
 - Processes running with the same OS-user privileges (or an administrator/root-equivalent context) remain inside the local trust boundary; the per-runtime token is defense in depth, not an OS sandbox.
@@ -267,7 +347,7 @@ FileMCP intentionally treats the local workspace as a privileged boundary.
 - Windows resolves existing paths through Win32 handles (`GetFinalPathNameByHandleW`) so NTFS junctions, symbolic links, and other reparse-point escapes cannot be treated as ordinary in-root paths.
 - Windows containment is case-insensitive and rejects rooted/UNC input supplied where a relative workspace path is required.
 - Recursive search runs the bundled ripgrep with a fixed argument set (`--no-config`, no symlink following, no preprocessors or PCRE2). Patterns and globs are passed as single `--regexp=`/`--glob=` arguments, and every returned path is re-validated against the workspace root before it is reported or read.
-- File reads and writes are limited to **5 MB per request**.
+- Individual file reads and writes are limited to **5 MB**. `apply_patch` additionally limits a batch to **32 MB** of aggregate source data; these limits do not imply whole-repository reads.
 - Text responses and search previews are truncated to bounded sizes.
 - Searches respect `.gitignore`/`.ignore` files, skip `.git`, and skip the default excluded directories (`.venv`, `__pycache__`, `build`, `dist`, `node_modules`) unless `include_ignored` is set; `.git` is always skipped, including when explicitly targeted. Explicitly targeting one of the other default excluded directories as the search path remains available.
 - Search output, per-file size (1 MB), ripgrep subprocess runtime (30 s), `repo_overview` directory enumeration (50,000 entries), and `search_code` ranking budgets (2,000 files / 50 MB) are bounded. Results report `truncation_reasons` (for example `head_limit`, `preview_limit`, `output_limit`, `timeout`, `search_error`, `visited_limit`, `ignore_diagnostics_limit`) instead of silently implying complete coverage. Ranking scores are deterministic ordering heuristics, not confidence values.
@@ -291,8 +371,8 @@ Git operations and mutating MCP tools are serialized against each other so anoth
 
 ### Process lifecycle
 
-- Shell command timeout defaults to **30 seconds** and is capped at **120 seconds**.
-- Shell/Git stdout and stderr are bounded to **100 KB per stream** for tool results.
+- `run_command` defaults to **30 seconds** and is capped at **120 seconds**. The separate `start_command` session API defaults to **600 seconds**, with an allowed range of **1–3,600 seconds**; one job may run at a time.
+- Synchronous `run_command` and Git results cap stdout and stderr at **100 KB per stream**. Command sessions use a separate bounded combined-output buffer and expose truncation/cursor metadata.
 - Executable, argument, and environment strings are validated before process launch; NUL-truncation and invalid environment names are rejected.
 - macOS launches children in dedicated process groups and cleans descendants on timeout/stop/parent exit.
 - Windows assigns children to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and also uses process-tree termination as a fallback.
@@ -323,12 +403,14 @@ For private vulnerability reporting guidance, see [`SECURITY.md`](SECURITY.md).
 ## Architecture
 
 ```text
-                       ChatGPT / OpenAI product
+                         MCP client / ChatGPT
                                   │
-                                  │ Secure MCP Tunnel
-                                  ▼
-                         OpenAI tunnel-client
-                                  │
+                 ┌────────────────┴──────────────────┐
+                 │                                   │
+       OpenAI Secure MCP Tunnel          Cloudflare Tunnel (macOS)
+         OpenAI tunnel-client                   cloudflared
+                 │                                   │
+                 └────────────────┬──────────────────┘
                                   │ http://127.0.0.1:<port>/mcp
                                   ▼
                   ┌───────────────────────────────┐
@@ -349,7 +431,7 @@ For private vulnerability reporting guidance, see [`SECURITY.md`](SECURITY.md).
                   └───────────────────────────────┘
 ```
 
-The macOS and Windows implementations intentionally use native platform APIs while preserving the same MCP/tool behavior and security invariants.
+OAuth for the Cloudflare route is implemented by FileMCP; `cloudflared` forwards requests to the loopback server. The two platforms use native UI and process APIs while sharing the core MCP tool behavior; Cloudflare and separate Git push/history permission switches are macOS-specific.
 
 ## MCP protocol compatibility
 
@@ -364,7 +446,9 @@ Tool definitions include `outputSchema`, and successful tool responses provide s
 
 ```text
 .
-├── assets/branding/
+├── assets/
+│   ├── branding/
+│   └── screenshots/macos/    # Native UI captures for this README
 ├── macos/
 │   ├── FileMCPApp.swift
 │   ├── LocalMCPRuntime.swift
@@ -377,6 +461,8 @@ Tool definitions include `outputSchema`, and successful tool responses provide s
 │   └── assets/
 ├── tests/
 │   ├── test_swift_runtime.sh
+│   ├── test_swift_ui.sh
+│   ├── test_swift_agent_tools.sh
 │   └── test_windows_runtime.ps1
 ├── vendor/tunnel-client/
 ├── build_macos_app.sh
@@ -396,11 +482,15 @@ Development run:
 ./run_macos_dev.sh
 ```
 
-Full integration suite:
+Runtime integration suite, native UI/log regression checks and coding-tool checks:
 
 ```bash
 ./tests/test_swift_runtime.sh
+bash tests/test_swift_ui.sh
+bash tests/test_swift_agent_tools.sh
 ```
+
+The UI checks include both appearances, all provider modes and connection states, four-tab navigation, long paths, action-title fit and configuration locking. Tests use isolated sample data.
 
 The malformed HTTP parser fuzz loop defaults to 160 iterations. For a faster targeted run:
 
