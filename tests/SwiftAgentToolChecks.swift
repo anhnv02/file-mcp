@@ -119,58 +119,60 @@ func runAgentToolChecks(rootPath: String) throws {
     check((completed["output"] as! String).contains("second") && !(completed["output"] as! String).contains("first"))
     check(try call(full, "read_command_output", ["session_id": id, "cursor": completed["next_cursor"]!])["output"] as? String == "")
     rejects("future cursor") { _ = try call(full, "read_command_output", ["session_id": id, "cursor": 99999]) }
-    // Independent ChatGPT sessions may work in different worktrees concurrently.
-    for name in ["worktree-a", "worktree-b", "worktree-c", "worktree-d", "worktree-e", "worktree-free"] {
+    // Exercise the actual configured limit (default 8; 4...16 supported).
+    let maxParallel = min(16, max(4, Int(ProcessInfo.processInfo.environment["FILEMCP_MAX_CONCURRENT_COMMANDS"] ?? "") ?? 8))
+    let parallelNames = (0..<maxParallel).map { String(format: "worktree-%02d", $0) }
+    for name in parallelNames + ["worktree-overcap", "worktree-free"] {
         try write("\(name)/sample.txt", "original")
     }
-    try write("worktree-a/nested/sample.txt", "nested")
+    try write("\(parallelNames[0])/nested/sample.txt", "nested")
     var parallel: [String: String] = [:]
-    for name in ["worktree-a", "worktree-b", "worktree-c", "worktree-d"] {
+    for name in parallelNames {
         let result = try call(full, "start_command", [
-            "request_id": "parallel-\(name)", "command": "printf started; sleep 4; printf finished",
-            "cwd": name, "timeout_seconds": 15,
+            "request_id": "parallel-\(name)", "command": "printf started; sleep 12; printf finished",
+            "cwd": name, "timeout_seconds": 25,
         ])
         parallel[name] = result["session_id"] as? String
     }
-    check(parallel.count == 4)
-    rejects("fifth simultaneous session over cap") {
-        _ = try call(full, "start_command", ["request_id": "parallel-fifth", "command": "true", "cwd": "worktree-e"])
+    check(parallel.count == maxParallel)
+    rejects("session beyond configured concurrency cap") {
+        _ = try call(full, "start_command", ["request_id": "parallel-overcap", "command": "true", "cwd": "worktree-overcap"])
     }
     rejects("nested session conflicts with parent scope") {
-        _ = try call(full, "start_command", ["request_id": "parallel-nested", "command": "true", "cwd": "worktree-a/nested"])
+        _ = try call(full, "start_command", ["request_id": "parallel-nested", "command": "true", "cwd": parallelNames[0] + "/nested"])
     }
     rejects("root session overlaps all worktrees") {
         _ = try call(full, "start_command", ["request_id": "parallel-root", "command": "true"])
     }
     rejects("same-worktree file mutation blocked") {
-        _ = try call(full, "edit_file", ["relative_path": "worktree-a/sample.txt", "old_text": "original", "new_text": "unsafe"])
+        _ = try call(full, "edit_file", ["relative_path": parallelNames[0] + "/sample.txt", "old_text": "original", "new_text": "unsafe"])
     }
     rejects("nested file mutation blocked") {
-        _ = try call(full, "edit_file", ["relative_path": "worktree-a/nested/sample.txt", "old_text": "nested", "new_text": "unsafe"])
+        _ = try call(full, "edit_file", ["relative_path": parallelNames[0] + "/nested/sample.txt", "old_text": "nested", "new_text": "unsafe"])
     }
     rejects("mixed-scope patch rejected before mutation") {
         _ = try call(full, "apply_patch", ["changes": [
             ["relative_path": "worktree-free/sample.txt", "old_text": "original", "new_text": "bad"],
-            ["relative_path": "worktree-b/sample.txt", "old_text": "original", "new_text": "bad"],
+            ["relative_path": parallelNames[1] + "/sample.txt", "old_text": "original", "new_text": "bad"],
         ]])
     }
     check(try String(contentsOf: root.appendingPathComponent("worktree-free/sample.txt"), encoding: .utf8) == "original")
     _ = try call(full, "edit_file", ["relative_path": "worktree-free/sample.txt", "old_text": "original", "new_text": "safe"])
     check(try String(contentsOf: root.appendingPathComponent("worktree-free/sample.txt"), encoding: .utf8) == "safe")
-    rejects("synchronous command shares total four-task budget") {
+    rejects("synchronous command shares configured total task budget") {
         _ = try full.call(name: "run_command", arguments: ["command": "printf should-not-run", "cwd": "worktree-free"])
     }
-    _ = try call(full, "cancel_command", ["session_id": parallel["worktree-b"]!])
-    check(try poll(parallel["worktree-b"]!)["state"] as? String == "cancelled")
-    check(try call(full, "read_command_output", ["session_id": parallel["worktree-a"]!])["state"] as? String == "running")
-    for name in ["worktree-a", "worktree-c", "worktree-d"] {
-        let result = try poll(parallel[name]!, deadline: 12)
+    _ = try call(full, "cancel_command", ["session_id": parallel[parallelNames[1]]!])
+    check(try poll(parallel[parallelNames[1]]!)["state"] as? String == "cancelled")
+    check(try call(full, "read_command_output", ["session_id": parallel[parallelNames[0]]!])["state"] as? String == "running")
+    for name in parallelNames where name != parallelNames[1] {
+        let result = try poll(parallel[name]!, deadline: 20)
         check(result["state"] as? String == "exited" && result["exit_code"] as? Int32 == 0)
         check((result["output"] as? String ?? "").contains("finished"))
     }
     let sync = try full.call(name: "run_command", arguments: ["command": "printf sync-ok", "cwd": "worktree-free"])
     check(String(describing: sync.structuredContent).contains("sync-ok"))
-    print("PASS: four disjoint command sessions, scoped mutations, independent cancellation and bounded admission")
+    print("PASS: \(maxParallel) disjoint sessions, scoped mutations, independent cancellation and bounded admission")
 
     // Independent synchronous commands share the same bounded concurrency
     // budget as long sessions, but never hold the global mutation slot.

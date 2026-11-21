@@ -6,6 +6,7 @@ No network is used except loopback; test processes are cleaned up by the suite.
 """
 import concurrent.futures
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -36,7 +37,10 @@ def success(name, arguments):
     return body
 
 
-for name in ("http-a", "http-b", "http-c", "http-d", "http-e"):
+configured = int(os.environ.get("FILEMCP_MAX_CONCURRENT_COMMANDS", "8"))
+limit = max(4, min(16, configured))
+workdirs = [f"http-{n:02d}" for n in range(limit)]
+for name in workdirs + ["http-overcap"]:
     (root / name).mkdir(exist_ok=True)
 
 # Two separate HTTP connections must execute run_command at the same time.
@@ -46,36 +50,36 @@ def sync_client(name, peer):
     return success("run_command", {"command": shell, "cwd": name, "timeout_seconds": 12})
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-    jobs = [pool.submit(sync_client, "http-a", "http-b"), pool.submit(sync_client, "http-b", "http-a")]
+    jobs = [pool.submit(sync_client, workdirs[0], workdirs[1]), pool.submit(sync_client, workdirs[1], workdirs[0])]
     results = [future.result(timeout=16) for future in jobs]
 assert all("parallel-sync-ok" in str(v) for v in results), results
 print("http-concurrent-sync-clients: ok")
 
 # Four long sessions from independent callers must be admitted concurrently.
 active = {}
-for name in ("http-a", "http-b", "http-c", "http-d"):
+for name in workdirs:
     result = success("start_command", {
         "request_id": "independent-client-" + name,
-        "command": "printf parallel-start; sleep 4; printf parallel-end",
+        "command": "printf parallel-start; sleep 12; printf parallel-end",
         "cwd": name,
-        "timeout_seconds": 12,
+        "timeout_seconds": 25,
     })
     assert result.get("state") == "running", result
     active[name] = result["session_id"]
-failed, _, _ = rpc("start_command", {"request_id": "over-capacity", "command": "true", "cwd": "http-e"})
+failed, _, _ = rpc("start_command", {"request_id": "over-capacity", "command": "true", "cwd": "http-overcap"})
 assert failed, "Fifth concurrent job should be refused"
-failed, _, _ = rpc("start_command", {"request_id": "same-worktree", "command": "true", "cwd": "http-a"})
+failed, _, _ = rpc("start_command", {"request_id": "same-worktree", "command": "true", "cwd": workdirs[0]})
 assert failed, "Overlapping cwd should be refused"
-print("http-four-long-clients-admitted: ok")
+print(f"http-{limit}-long-clients-admitted: ok")
 
 # Cancelling one job does not stop its siblings.
-success("cancel_command", {"session_id": active["http-b"]})
-deadline = time.monotonic() + 12
+success("cancel_command", {"session_id": active[workdirs[1]]})
+deadline = time.monotonic() + 20
 while time.monotonic() < deadline:
     states = {name: success("read_command_output", {"session_id": sid}).get("state") for name, sid in active.items()}
     if all(value not in ("running", "stopping") for value in states.values()):
         break
     time.sleep(.1)
-assert states["http-b"] == "cancelled", states
-assert all(states[name] == "exited" for name in ("http-a", "http-c", "http-d")), states
+assert states[workdirs[1]] == "cancelled", states
+assert all(states[name] == "exited" for name in workdirs if name != workdirs[1]), states
 print("http-independent-session-cancellation: ok")

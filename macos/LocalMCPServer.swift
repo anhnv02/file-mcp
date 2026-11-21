@@ -178,7 +178,14 @@ private final class LocalTools {
     // Bounded concurrency across independent working directories. These are
     // cooperative collision checks, not a shell sandbox (commands can use
     // absolute paths and access files outside their working directory).
-    private let maxActiveCommandSessions = 4
+    // Runtime setting for synchronous and long-running commands together.
+    // The default is 8; clamp explicit values to the supported 4...16 range.
+    // This is an admission bound, not a promise of available CPU or RAM.
+    private let maxActiveCommandSessions: Int = {
+        let raw = ProcessInfo.processInfo.environment["FILEMCP_MAX_CONCURRENT_COMMANDS"] ?? ""
+        guard let value = Int(raw) else { return 8 }
+        return min(16, max(4, value))
+    }()
     private var sessions: [CommandSession] = []
     // Synchronous run_command calls hold scoped command leases too.
     private var synchronousCommandPaths: [UUID: String] = [:]
@@ -189,9 +196,9 @@ private final class LocalTools {
     private let enableCommands: Bool
     private let enableGitPush: Bool
     private let enableCodexHistory: Bool
-    private let toolSlots = DispatchSemaphore(value: 8)
+    private let toolSlots = DispatchSemaphore(value: 16)
     private let mutationSlot = DispatchSemaphore(value: 1)
-    private let commandSlots = DispatchSemaphore(value: 4)
+    private let commandSlots = DispatchSemaphore(value: 16)
     private let gitSlots = DispatchSemaphore(value: 3)
     private let codexHistorySlot = DispatchSemaphore(value: 1)
     private let serializedToolNames: Set<String> = [
