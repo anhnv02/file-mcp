@@ -119,6 +119,103 @@ func runAgentToolChecks(rootPath: String) throws {
     check((completed["output"] as! String).contains("second") && !(completed["output"] as! String).contains("first"))
     check(try call(full, "read_command_output", ["session_id": id, "cursor": completed["next_cursor"]!])["output"] as? String == "")
     rejects("future cursor") { _ = try call(full, "read_command_output", ["session_id": id, "cursor": 99999]) }
+    // Independent ChatGPT sessions may work in different worktrees concurrently.
+    for name in ["worktree-a", "worktree-b", "worktree-c", "worktree-d", "worktree-e", "worktree-free"] {
+        try write("\(name)/sample.txt", "original")
+    }
+    try write("worktree-a/nested/sample.txt", "nested")
+    var parallel: [String: String] = [:]
+    for name in ["worktree-a", "worktree-b", "worktree-c", "worktree-d"] {
+        let result = try call(full, "start_command", [
+            "request_id": "parallel-\(name)", "command": "printf started; sleep 4; printf finished",
+            "cwd": name, "timeout_seconds": 15,
+        ])
+        parallel[name] = result["session_id"] as? String
+    }
+    check(parallel.count == 4)
+    rejects("fifth simultaneous session over cap") {
+        _ = try call(full, "start_command", ["request_id": "parallel-fifth", "command": "true", "cwd": "worktree-e"])
+    }
+    rejects("nested session conflicts with parent scope") {
+        _ = try call(full, "start_command", ["request_id": "parallel-nested", "command": "true", "cwd": "worktree-a/nested"])
+    }
+    rejects("root session overlaps all worktrees") {
+        _ = try call(full, "start_command", ["request_id": "parallel-root", "command": "true"])
+    }
+    rejects("same-worktree file mutation blocked") {
+        _ = try call(full, "edit_file", ["relative_path": "worktree-a/sample.txt", "old_text": "original", "new_text": "unsafe"])
+    }
+    rejects("nested file mutation blocked") {
+        _ = try call(full, "edit_file", ["relative_path": "worktree-a/nested/sample.txt", "old_text": "nested", "new_text": "unsafe"])
+    }
+    rejects("mixed-scope patch rejected before mutation") {
+        _ = try call(full, "apply_patch", ["changes": [
+            ["relative_path": "worktree-free/sample.txt", "old_text": "original", "new_text": "bad"],
+            ["relative_path": "worktree-b/sample.txt", "old_text": "original", "new_text": "bad"],
+        ]])
+    }
+    check(try String(contentsOf: root.appendingPathComponent("worktree-free/sample.txt"), encoding: .utf8) == "original")
+    _ = try call(full, "edit_file", ["relative_path": "worktree-free/sample.txt", "old_text": "original", "new_text": "safe"])
+    check(try String(contentsOf: root.appendingPathComponent("worktree-free/sample.txt"), encoding: .utf8) == "safe")
+    rejects("synchronous command shares total four-task budget") {
+        _ = try full.call(name: "run_command", arguments: ["command": "printf should-not-run", "cwd": "worktree-free"])
+    }
+    _ = try call(full, "cancel_command", ["session_id": parallel["worktree-b"]!])
+    check(try poll(parallel["worktree-b"]!)["state"] as? String == "cancelled")
+    check(try call(full, "read_command_output", ["session_id": parallel["worktree-a"]!])["state"] as? String == "running")
+    for name in ["worktree-a", "worktree-c", "worktree-d"] {
+        let result = try poll(parallel[name]!, deadline: 12)
+        check(result["state"] as? String == "exited" && result["exit_code"] as? Int32 == 0)
+        check((result["output"] as? String ?? "").contains("finished"))
+    }
+    let sync = try full.call(name: "run_command", arguments: ["command": "printf sync-ok", "cwd": "worktree-free"])
+    check(String(describing: sync.structuredContent).contains("sync-ok"))
+    print("PASS: four disjoint command sessions, scoped mutations, independent cancellation and bounded admission")
+
+    // Independent synchronous commands share the same bounded concurrency
+    // budget as long sessions, but never hold the global mutation slot.
+    for name in ["sync-a", "sync-b", "sync-free"] {
+        try write("\(name)/sample.txt", "before")
+    }
+    let synchronousGroup = DispatchGroup()
+    for name in ["sync-a", "sync-b"] {
+        synchronousGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            defer { synchronousGroup.leave() }
+            do {
+                _ = try full.call(name: "run_command", arguments: [
+                    "cwd": name,
+                    "command": "touch started; while [ ! -f release ]; do sleep 0.05; done; printf sync-ok",
+                    "timeout_seconds": 12,
+                ])
+                try Data("ok".utf8).write(to: root.appendingPathComponent(name).appendingPathComponent("completed"))
+            } catch {
+                try? Data(String(describing: error).utf8).write(
+                    to: root.appendingPathComponent(name).appendingPathComponent("failed"))
+            }
+        }
+    }
+    let syncAdmissionDeadline = Date().addingTimeInterval(6)
+    while Date() < syncAdmissionDeadline && !["sync-a", "sync-b"].allSatisfy({
+        FileManager.default.fileExists(atPath: root.appendingPathComponent($0 + "/started").path)
+    }) { Thread.sleep(forTimeInterval: 0.02) }
+    check(["sync-a", "sync-b"].allSatisfy({
+        FileManager.default.fileExists(atPath: root.appendingPathComponent($0 + "/started").path)
+    }))
+    rejects("synchronous command blocks same-directory edits") {
+        _ = try call(full, "edit_file", ["relative_path": "sync-a/sample.txt", "old_text": "before", "new_text": "unsafe"])
+    }
+    rejects("synchronous command blocks overlapping long task") {
+        _ = try call(full, "start_command", ["request_id": "sync-overlap", "command": "true", "cwd": "sync-a"])
+    }
+    _ = try call(full, "edit_file", ["relative_path": "sync-free/sample.txt", "old_text": "before", "new_text": "safe"])
+    for name in ["sync-a", "sync-b"] { try write(name + "/release", "1") }
+    check(synchronousGroup.wait(timeout: .now() + 8) == .success)
+    check(["sync-a", "sync-b"].allSatisfy({
+        FileManager.default.fileExists(atPath: root.appendingPathComponent($0 + "/completed").path)
+    }))
+    print("PASS: simultaneous synchronous commands with scoped collision protection")
+
     let cancel = try call(full, "start_command", ["request_id": "cancel", "command": "sleep 30 & echo $! > child.pid; wait"])
     let cancelID = cancel["session_id"] as! String
     Thread.sleep(forTimeInterval: 0.2)

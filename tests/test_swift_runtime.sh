@@ -2605,5 +2605,6 @@ PYEXT
 fi
 
 python3 tests/check_agent_tools_http.py
+python3 tests/check_parallel_clients_http.py "$BASE_URL" "$SERVER_ROOT" "$LOCAL_AUTH_TOKEN"
 
 stop_server
