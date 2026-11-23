@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — Windows parity for macOS command concurrency
+
+- Windows now shares a bounded 4–16 admission budget across asynchronous and synchronous commands, rejects overlapping workspace cwd trees, and reserves mutations against concurrent command processes.
+- Added native Windows eight-slot concurrency, collision, cancellation and synchronous parallel regression tests.
+
 All notable changes will be documented in this file from the first public release onward.
 
 ## Unreleased

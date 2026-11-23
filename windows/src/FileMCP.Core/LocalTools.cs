@@ -38,9 +38,9 @@ internal sealed partial class LocalTools
     private readonly bool _enableCommands;
     private readonly string? _safeGitEmptyFile;
     private readonly string? _safeGitHooksDirectory;
-    private readonly SemaphoreSlim _toolSlots = new(8, 8);
+    private readonly SemaphoreSlim _toolSlots = new(16, 16);
     private readonly SemaphoreSlim _serializedSlot = new(1, 1);
-    private readonly SemaphoreSlim _commandSlots = new(2, 2);
+    private readonly WorkspaceCommandBudget _commandBudget;
     private readonly SemaphoreSlim _gitSlots = new(3, 3);
     private readonly SemaphoreSlim _codexHistorySlot = new(1, 1);
     private static readonly HashSet<string> SerializedToolNames = new(StringComparer.Ordinal)
@@ -79,9 +79,11 @@ internal sealed partial class LocalTools
         ".csproj", ".fsproj", ".sln", ".vbproj", ".xcodeproj", ".xcworkspace",
     ];
 
-    public LocalTools(string allowedDirectory, string gitUserName, string gitUserEmail, bool enableCommands, Ripgrep? ripgrep = null)
+    public LocalTools(string allowedDirectory, string gitUserName, string gitUserEmail, bool enableCommands, Ripgrep? ripgrep = null, WorkspaceCommandBudget? sharedBudget = null)
     {
         _resolver = new SafePathResolver(allowedDirectory);
+        _commandBudget = sharedBudget ?? new WorkspaceCommandBudget(
+            int.TryParse(Environment.GetEnvironmentVariable("FILEMCP_MAX_CONCURRENT_COMMANDS"), out var cap) ? cap : 8);
         _ripgrep = ripgrep ?? new Ripgrep();
         _gitUserName = gitUserName;
         _gitUserEmail = gitUserEmail;
@@ -232,16 +234,18 @@ internal sealed partial class LocalTools
     public async Task<ToolCallOutput> CallAsync(string name, JsonObject arguments, CancellationToken cancellationToken = default)
     {
         await _toolSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var serialize = SerializedToolNames.Contains(name) ||
+        var serialize = (name != "run_command" && SerializedToolNames.Contains(name)) ||
             (name == "batch_read" && BatchReadNeedsSerialization(arguments));
         if (serialize)
         {
             await _serializedSlot.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
+        Guid? mutationLease = null;
         try
         {
             ValidateArguments(name, arguments);
-            if (serialize && name != "start_command") EnsureNoActiveCommand();
+            if (serialize && name != "start_command")
+                mutationLease = _commandBudget.AcquireSynchronous(_resolver.Root);
             return name switch
             {
                 "list_files" or "read_file" or "read_file_range" or "grep" or "search_code" or
@@ -276,6 +280,7 @@ internal sealed partial class LocalTools
         }
         finally
         {
+            if (mutationLease is Guid lease) _commandBudget.Release(lease);
             if (serialize) _serializedSlot.Release();
             _toolSlots.Release();
         }
@@ -1562,7 +1567,7 @@ internal sealed partial class LocalTools
         if (string.IsNullOrWhiteSpace(command)) throw new FileMcpException("command must not be empty");
         var workdir = _resolver.Resolve(cwd);
         if (!Directory.Exists(workdir)) throw new FileMcpException($"No such working directory: {(string.IsNullOrEmpty(cwd) ? "." : cwd)}");
-        await _commandSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var lease = _commandBudget.AcquireSynchronous(workdir);
         try
         {
             var result = await ProcessRunner.RunAsync(PowerShellPath(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], workdir,
@@ -1577,7 +1582,7 @@ internal sealed partial class LocalTools
             }
             return FormatProcessResult(result);
         }
-        finally { _commandSlots.Release(); }
+        finally { _commandBudget.Release(lease); }
     }
 
     private static string PowerShellPath()

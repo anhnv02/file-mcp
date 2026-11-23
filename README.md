@@ -39,6 +39,7 @@ FileMCP is an independent open-source project. It is not an official OpenAI prod
   - macOS Keychain.
   - Windows Credential Manager.
 - Process output, request sizes, search scope, and concurrency are bounded.
+- Both macOS and Windows support 4–16 configurable concurrent command tasks (default 8 via `FILEMCP_MAX_CONCURRENT_COMMANDS`) with disjoint working directories; cwd collision checks are cooperative, not an OS sandbox.
 - Descendant processes are cleaned up on timeout, stop, and application shutdown.
 - Official OpenAI `tunnel-client` binaries are vendored with documented provenance and checksums.
 
