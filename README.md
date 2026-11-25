@@ -1,4 +1,10 @@
-![FileMCP — Your local workspace, connected to ChatGPT. On your terms.](assets/branding/filemcp-v2/readme-header.png)
+<p align="center">
+  <img src="assets/branding/filemcp-v2/app-icon-256.png" width="100" alt="FileMCP">
+</p>
+
+<h1 align="center">FileMCP</h1>
+
+<p align="center">Your local workspace, connected to ChatGPT, Claude and Muse AI.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-12%2B-22293A?style=flat-square&logo=apple&logoColor=white" alt="macOS 12 or later">
@@ -9,19 +15,33 @@
 
 <p align="center">
   <a href="#quick-start"><strong>Get started</strong></a> ·
+  <a href="#supported-clients">Supported clients</a> ·
   <a href="#highlights">Features</a> ·
   <a href="#security-model">Security</a> ·
   <a href="#development-and-verification">Development</a>
 </p>
 
-FileMCP is a native **macOS and Windows** desktop application that gives ChatGPT controlled access to a local workspace through MCP. It can read and modify files, run Git operations, and—only when explicitly enabled—run local shell commands.
+FileMCP is a native **macOS and Windows** desktop application that gives ChatGPT, Claude, Muse AI and compatible MCP clients controlled access to a local workspace through the Model Context Protocol (MCP). It can read and modify files, run Git operations, and—only when explicitly enabled—run local shell commands.
 
-The MCP server stays bound to `127.0.0.1`. By default, FileMCP uses OpenAI [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) to connect supported OpenAI products without a public MCP endpoint. On macOS, you can alternatively use your own Cloudflare Tunnel with a public HTTPS hostname and OAuth. Both options establish an outbound tunnel rather than opening an inbound router port.
+The MCP server stays bound to `127.0.0.1`. By default, FileMCP uses OpenAI [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) to connect supported OpenAI products without a public MCP endpoint. On macOS, use your own Cloudflare Tunnel with a public HTTPS hostname and OAuth to connect Claude, Muse AI, ChatGPT and other compatible remote MCP clients. Both options establish an outbound tunnel rather than opening an inbound router port.
 
 > [!WARNING]
 > FileMCP can modify or delete files inside the directory you choose. If command execution is enabled, it can also run processes with the permissions of your signed-in OS user. Use a narrowly scoped workspace and enable shell access only when you trust the workflow using it.
 
-FileMCP is an independent open-source project. It is not an official OpenAI product.
+FileMCP is an independent open-source project and is not affiliated with OpenAI, Anthropic or Meta.
+
+## Supported clients
+
+| Client | OpenAI Secure MCP Tunnel | Cloudflare Tunnel |
+| --- | --- | --- |
+| [ChatGPT](#chatgpt) | macOS, Windows | macOS |
+| [Claude](#claude) | — | macOS |
+| [Muse AI](#muse-ai) | — | macOS |
+| Other compatible remote MCP clients | — | macOS |
+
+OpenAI Secure MCP Tunnel is specific to supported OpenAI products. For other clients, use the Cloudflare provider and a remote Streamable HTTP MCP endpoint with OAuth. Client-side availability and authentication support may vary.
+
+Cloudflare support is currently macOS only.
 
 ## Highlights
 
@@ -107,9 +127,10 @@ The macOS build scripts understand Intel (`darwin-amd64`), but that platform is 
 
 ## Requirements
 
-For ChatGPT use:
+For MCP client use:
 
-- An account/workspace that permits custom MCP server connections. Availability and administrative permissions depend on the account and workspace; follow OpenAI's current [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+- An account or workspace that permits custom MCP connections. Availability and administrative permissions depend on the client.
+- For Claude and Muse AI, a macOS FileMCP instance configured with Cloudflare Tunnel.
 - Git installed if you want to use the built-in Git tools.
 
 Choose one connection provider:
@@ -190,7 +211,7 @@ For the default OpenAI provider:
 
 1. Open **Connection** and enter the Secure MCP Tunnel ID and runtime API key. Saved keys go to macOS Keychain or Windows Credential Manager.
 2. Open **Workspace** on macOS (**Settings** on Windows) and choose the local folder to share. File tools can read, edit and delete files in that folder; additional permissions are off by default on macOS.
-3. Click **Connect** to save the current configuration and start the local server and tunnel. Wait for **Connected**, then add it to ChatGPT as described [below](#add-the-mcp-server-in-chatgpt).
+3. Click **Connect** to save the current configuration and start the local server and tunnel. Wait for **Connected**, then add it to ChatGPT as described [below](#chatgpt).
 
 On macOS, **Overview** summarizes the selected folder, enabled permissions and connection route. Use the top navigation for **Workspace**, **Connection** and **Activity**. The **Dark / Light** button remembers your appearance choice across launches; before a choice is saved, startup uses the system appearance.
 
@@ -198,14 +219,14 @@ The macOS connection control is available on every tab. Disconnect before changi
 
 Closing the window keeps sharing active. Use **Disconnect** to stop sharing or **Quit FileMCP** to stop the app.
 
-#### Alternative: Cloudflare Tunnel (macOS)
+#### Cloudflare Tunnel (macOS)
 
-Expose FileMCP through your own [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). Cloudflare support is currently macOS only; OAuth is the default authentication method.
+Expose FileMCP through your own [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). Use this provider for Claude, Muse AI or other compatible remote MCP clients, or as an alternative for ChatGPT. OAuth is the default authentication method.
 
 1. Install `cloudflared` (`brew install cloudflared`). FileMCP looks next to the app binary, then in `MCP_CLOUDFLARED`, `/opt/homebrew/bin`, `/usr/local/bin`, and `PATH`. It is not bundled.
 2. In Cloudflare Zero Trust, create a remotely-managed tunnel and a public hostname (for example `mcp.example.com`) routing to `http://127.0.0.1:<MCP port>` (default `8008`). Route the **entire hostname**, including `/oauth/*` and `/.well-known/*`, rather than only `/mcp`.
 3. In **Connection**, choose *Cloudflare Tunnel (dashboard token)* and enter the tunnel token and public hostname. Alternatively, choose *Cloudflare Tunnel (log in with cloudflared)* to log in and select or create a tunnel. Named tunnels require a local credentials JSON; use dashboard-token mode when that file is unavailable.
-4. Click **Connect** and wait for **Connected**. Copy the endpoint, `https://<hostname>/mcp`, into ChatGPT. Choose **OAuth** with **dynamic client registration (DCR)**; the authorization server advertises public-client authentication (`none`), so no static client secret is required.
+4. Click **Connect** and wait for **Connected**. Copy the endpoint, `https://<hostname>/mcp`, and follow the [client setup instructions](#connect-your-mcp-client). Where supported, choose **OAuth** with **dynamic client registration (DCR)**. The authorization server advertises public-client authentication (`none`); no static client secret is required.
 5. When your FileMCP authorization page opens in the browser, review the client, callback and enabled permissions. Use **Copy login code** in the macOS app and paste the code into that page. Only authorize a connection you started, on your own FileMCP hostname. Keep this code private.
 
 FileMCP uses authorization codes with PKCE S256. Access tokens expire after one hour; refresh tokens rotate on use and expire after seven days. A reused refresh token revokes its token family. Approved client registrations and hashed token records are kept in Keychain so an app restart preserves valid sessions. Changing the workspace, enabled permissions or login code requires fresh authorization. Disconnect and use the reset button next to the endpoint to revoke sessions and reset the login code for that hostname.
@@ -214,7 +235,9 @@ The Cloudflare tunnel token and login code are also kept in Keychain. The tunnel
 
 **Migration:** older Cloudflare connectors using `/mcp/<secret>` must be reconfigured for OAuth. The optional **Compatibility: use a secret in the MCP URL** setting restores that legacy no-auth client flow only after an explicit warning. It is off by default and uses a separate credential from OAuth. Anyone with a compatibility URL can use the enabled tools, and external proxies or clients may log it. Prefer OAuth.
 
-### Add the MCP server in ChatGPT
+### Connect your MCP client
+
+#### ChatGPT
 
 Follow OpenAI's current [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt) guide. In the current Plugins interface, open **Plugins → + → Add custom MCP server**; account and workspace policies still apply.
 
@@ -222,6 +245,33 @@ Follow OpenAI's current [Connect and test your plugin](https://developers.openai
 - For Cloudflare, enter the full HTTPS endpoint, including `/mcp`, and configure OAuth as described above.
 
 Review the connection warning and discovered tools before creating the plugin. Keep FileMCP connected while using it. Older ChatGPT interfaces may place custom MCP setup under Developer Mode; use the current official guide for your account.
+
+#### Claude
+
+1. Connect FileMCP using [Cloudflare Tunnel](#cloudflare-tunnel-macos).
+2. In Claude, open **Customize → Connectors**, choose **Add custom connector** and name it `FileMCP`.
+3. Enter the full HTTPS endpoint (`https://<hostname>/mcp`). Use OAuth with dynamic client registration; leave static client credentials blank when using DCR.
+4. Connect, then complete authorization on your FileMCP hostname as described in the Cloudflare setup above.
+5. Enable the connector in a conversation and try a read-only request, such as listing the files in the shared workspace.
+
+See the [Claude remote MCP connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) for current client setup and account requirements.
+
+#### Muse AI
+
+1. Connect FileMCP using [Cloudflare Tunnel](#cloudflare-tunnel-macos).
+2. Open [Muse AI](https://muse.ai/) and ask it to create a custom connector for your remote MCP server. For example:
+
+   > Create a custom connector named FileMCP for my remote MCP server at https://mcp.example.com/mcp using Streamable HTTP and OAuth with dynamic client registration.
+
+   Replace the example URL with the endpoint shown by FileMCP.
+3. Follow the connector setup and complete OAuth authorization on your FileMCP hostname if prompted. Enter the FileMCP login code only on that authorization page, not in chat.
+4. Test with a read-only request to list the shared workspace.
+
+Custom connector availability and the setup flow may vary by Muse account and client version. Keep FileMCP connected while using the connector.
+
+#### Other MCP clients
+
+Use the Cloudflare HTTPS endpoint in a client that supports remote Streamable HTTP MCP and FileMCP's OAuth flow. Review the client and requested permissions before authorizing access. Start with a read-only request to confirm the connection.
 
 On macOS, the HTTP server limits active connections to 32, imposes a fixed 15-second deadline for receiving a complete request and a 15-second response-write deadline, and closes active sockets at shutdown. Tool processing has its own existing operation limits; these deadlines apply to network reads/writes.
 
@@ -403,7 +453,7 @@ For private vulnerability reporting guidance, see [`SECURITY.md`](SECURITY.md).
 ## Architecture
 
 ```text
-                         MCP client / ChatGPT
+                 ChatGPT / Claude / Muse AI / MCP clients
                                   │
                  ┌────────────────┴──────────────────┐
                  │                                   │
