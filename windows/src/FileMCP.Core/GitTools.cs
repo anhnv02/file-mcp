@@ -42,7 +42,7 @@ internal sealed partial class LocalTools
         var layout = await RunGitAsync(repo,
             ["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--git-path", "objects"],
             FileMcpConstants.MaxGitSafetyOutputBytes, trimOutput: false, cancellationToken).ConfigureAwait(false);
-        var paths = layout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var paths = layout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
         if (paths.Length != 4) throw new FileMcpException("Could not validate Git repository layout safely");
 
         var worktree = CanonicalForComparison(paths[0]);
@@ -333,5 +333,5 @@ internal sealed partial class LocalTools
     private static bool EntryExists(string path) { try { _ = File.GetAttributes(path); return true; } catch (FileNotFoundException) { return false; } catch (DirectoryNotFoundException) { return false; } }
     private static string CanonicalForComparison(string path) => Path.GetFullPath(path).TrimEnd('\\', '/');
     private static bool PathEquals(string lhs, string rhs) => string.Equals(CanonicalForComparison(lhs), CanonicalForComparison(rhs), StringComparison.OrdinalIgnoreCase);
-    private static IEnumerable<string> SplitLines(string value) => value.Split(['\r','\n'], StringSplitOptions.RemoveEmptyEntries);
+    private static IEnumerable<string> SplitLines(string value) => value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 }

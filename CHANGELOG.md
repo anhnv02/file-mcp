@@ -4,6 +4,8 @@ All notable changes will be documented in this file from the first public releas
 
 ## Unreleased
 
+- Added bounded parallel command execution on macOS and Windows, scoped mutation reservations, independent cancellation and separate completed-session retention.
+
 - Added a compact macOS workspace overview, top navigation and a persistent light/dark appearance toggle.
 - Improved connection-action contrast, workspace alignment and layout regression coverage across tabs, providers and runtime states.
 - Updated setup documentation and added native screenshots for all macOS screens in light and dark appearance.

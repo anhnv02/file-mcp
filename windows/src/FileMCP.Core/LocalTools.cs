@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization.Metadata;
 
 namespace FileMCP.Core;
 
@@ -38,9 +39,9 @@ internal sealed partial class LocalTools
     private readonly bool _enableCommands;
     private readonly string? _safeGitEmptyFile;
     private readonly string? _safeGitHooksDirectory;
-    private readonly SemaphoreSlim _toolSlots = new(8, 8);
+    private readonly SemaphoreSlim _toolSlots = new(16, 16);
     private readonly SemaphoreSlim _serializedSlot = new(1, 1);
-    private readonly SemaphoreSlim _commandSlots = new(2, 2);
+    private readonly WorkspaceCommandBudget _commandBudget;
     private readonly SemaphoreSlim _gitSlots = new(3, 3);
     private readonly SemaphoreSlim _codexHistorySlot = new(1, 1);
     private static readonly HashSet<string> SerializedToolNames = new(StringComparer.Ordinal)
@@ -79,9 +80,11 @@ internal sealed partial class LocalTools
         ".csproj", ".fsproj", ".sln", ".vbproj", ".xcodeproj", ".xcworkspace",
     ];
 
-    public LocalTools(string allowedDirectory, string gitUserName, string gitUserEmail, bool enableCommands, Ripgrep? ripgrep = null)
+    public LocalTools(string allowedDirectory, string gitUserName, string gitUserEmail, bool enableCommands, Ripgrep? ripgrep = null, WorkspaceCommandBudget? sharedBudget = null)
     {
         _resolver = new SafePathResolver(allowedDirectory);
+        _commandBudget = sharedBudget ?? new WorkspaceCommandBudget(
+            int.TryParse(Environment.GetEnvironmentVariable("FILEMCP_MAX_CONCURRENT_COMMANDS"), out var cap) ? cap : 8);
         _ripgrep = ripgrep ?? new Ripgrep();
         _gitUserName = gitUserName;
         _gitUserEmail = gitUserEmail;
@@ -231,17 +234,23 @@ internal sealed partial class LocalTools
 
     public async Task<ToolCallOutput> CallAsync(string name, JsonObject arguments, CancellationToken cancellationToken = default)
     {
-        await _toolSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var serialize = SerializedToolNames.Contains(name) ||
+        var usesToolSlot = name != "run_command";
+        if (usesToolSlot) await _toolSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var serialize = (name != "run_command" && SerializedToolNames.Contains(name)) ||
             (name == "batch_read" && BatchReadNeedsSerialization(arguments));
-        if (serialize)
-        {
-            await _serializedSlot.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
+        var serialized = false;
+        Guid? mutationLease = null;
         try
         {
+            if (serialize)
+            {
+                await _serializedSlot.WaitAsync(cancellationToken).ConfigureAwait(false);
+                serialized = true;
+            }
             ValidateArguments(name, arguments);
-            if (serialize && name != "start_command") EnsureNoActiveCommand();
+            var mutationPaths = MutationPaths(name, arguments);
+            if (mutationPaths.Length != 0)
+                mutationLease = _commandBudget.AcquireMutation(mutationPaths);
             return name switch
             {
                 "list_files" or "read_file" or "read_file_range" or "grep" or "search_code" or
@@ -276,10 +285,23 @@ internal sealed partial class LocalTools
         }
         finally
         {
-            if (serialize) _serializedSlot.Release();
-            _toolSlots.Release();
+            if (mutationLease is Guid lease) _commandBudget.ReleaseMutation(lease);
+            if (serialized) _serializedSlot.Release();
+            if (usesToolSlot) _toolSlots.Release();
         }
     }
+
+    private string[] MutationPaths(string name, JsonObject args) => name switch
+    {
+        "write_file" or "edit_file" => [_resolver.Resolve(GetRequiredString(args, "relative_path"))],
+        "delete_file" or "delete_directory" => [_resolver.ResolveForDeletion(GetRequiredString(args, "relative_path"))],
+        "git_init" or "git_add" or "git_commit" or "git_push" => [_resolver.Resolve(GetString(args, "repo_path", ""))],
+        "apply_patch" => args["changes"] is JsonArray changes && changes.Count is >= 1 and <= 64
+            ? changes.Select(change => _resolver.Resolve(GetRequiredString(change as JsonObject
+                ?? throw new FileMcpException("Patch entry must be an object"), "relative_path"))).ToArray()
+            : throw new FileMcpException("changes must contain 1–64 patch entries"),
+        _ => [],
+    };
 
     private bool BatchReadNeedsSerialization(JsonObject arguments)
     {
@@ -491,7 +513,7 @@ internal sealed partial class LocalTools
     }
 
     private static bool ContainsGitMetadataComponent(string relativePath) =>
-        relativePath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries)
+        relativePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
             .Any(component => string.Equals(component, ".git", StringComparison.OrdinalIgnoreCase));
 
     private static string TrimDirectorySeparators(string path) =>
@@ -1562,7 +1584,7 @@ internal sealed partial class LocalTools
         if (string.IsNullOrWhiteSpace(command)) throw new FileMcpException("command must not be empty");
         var workdir = _resolver.Resolve(cwd);
         if (!Directory.Exists(workdir)) throw new FileMcpException($"No such working directory: {(string.IsNullOrEmpty(cwd) ? "." : cwd)}");
-        await _commandSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var lease = _commandBudget.AcquireSynchronous(workdir);
         try
         {
             var result = await ProcessRunner.RunAsync(PowerShellPath(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], workdir,
@@ -1577,7 +1599,7 @@ internal sealed partial class LocalTools
             }
             return FormatProcessResult(result);
         }
-        finally { _commandSlots.Release(); }
+        finally { _commandBudget.Release(lease); }
     }
 
     private static string PowerShellPath()
@@ -1606,7 +1628,7 @@ internal sealed partial class LocalTools
     }
 
     private static ToolCallOutput ObjectOutput(JsonObject value) => new(
-        new JsonArray(new JsonObject { ["type"] = "text", ["text"] = value.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) }), value);
+        new JsonArray(new JsonObject { ["type"] = "text", ["text"] = value.ToJsonString(new JsonSerializerOptions { WriteIndented = true, TypeInfoResolver = new DefaultJsonTypeInfoResolver() }) }), value);
 
     private static string GetRequiredString(JsonObject args, string key) => args[key] is JsonValue value && value.TryGetValue<string>(out var result) ? result : throw new FileMcpException($"Missing or invalid argument: {key}");
     private static int GetRequiredInt(JsonObject args, string key) => args[key] is JsonValue value && value.TryGetValue<int>(out var result) ? result : throw new FileMcpException($"Missing or invalid argument: {key}");

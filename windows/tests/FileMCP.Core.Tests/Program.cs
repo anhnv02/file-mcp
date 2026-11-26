@@ -37,6 +37,12 @@ internal static partial class Program
         Directory.CreateDirectory(root);
         try
         {
+            if (args.Length == 1 && args[0] == "--agent-tools-only")
+            {
+                await TestAgentToolsAsync(root);
+                Console.WriteLine($"windows-agent-tools: ok ({_assertions} assertions)");
+                return 0;
+            }
             await TestSettingsAndCredentialsAsync(root);
             await TestProcessRunnerAsync(root);
             await TestFilesystemAndToolsAsync(root);

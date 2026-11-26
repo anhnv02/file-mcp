@@ -109,8 +109,8 @@ public static class ProcessRunner
         using var job = WindowsJob.CreateAndAssign(process);
         var stdout = new BoundedTextBuffer(outputLimitBytes);
         var stderr = new BoundedTextBuffer(outputLimitBytes);
-        var stdoutTask = DrainAsync(process.StandardOutput, stdout);
-        var stderrTask = DrainAsync(process.StandardError, stderr);
+        var stdoutTask = DrainPipe(process.StandardOutput, stdout);
+        var stderrTask = DrainPipe(process.StandardError, stderr);
 
         var timeout = Math.Max(1, Math.Min(timeoutSeconds, MaxCommandTimeoutSeconds));
         var timedOut = false;
@@ -241,19 +241,26 @@ public static class ProcessRunner
         }
     }
 
-    private static async Task DrainAsync(StreamReader reader, BoundedTextBuffer buffer)
-    {
-        var chars = new char[8192];
-        while (true)
+    // Redirected Windows process pipes can require blocking reads. Keep those
+    // reads off the shared thread pool so parallel commands cannot starve
+    // process-exit continuations, timers, or MCP control requests.
+    internal static Task ReadPipe(StreamReader reader, Action<string> onOutput, CancellationToken cancellationToken = default) =>
+        Task.Factory.StartNew(() =>
         {
-            var read = await reader.ReadAsync(chars.AsMemory(0, chars.Length)).ConfigureAwait(false);
-            if (read <= 0)
+            var chars = new char[4096];
+            while (!cancellationToken.IsCancellationRequested)
             {
-                return;
+                int read;
+                try { read = reader.Read(chars, 0, chars.Length); }
+                catch (IOException) when (cancellationToken.IsCancellationRequested) { return; }
+                catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested) { return; }
+                if (read == 0) return;
+                onOutput(new string(chars, 0, read));
             }
-            buffer.Append(chars.AsSpan(0, read));
-        }
-    }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+    private static Task DrainPipe(StreamReader reader, BoundedTextBuffer buffer) =>
+        ReadPipe(reader, text => buffer.Append(text.AsSpan()));
 
     private static void ValidateProcessStrings(
         string executable,
@@ -354,8 +361,8 @@ public sealed class ManagedProcess : IDisposable
 
     private async Task PumpAsync()
     {
-        var stdout = PumpReaderAsync(_process.StandardOutput);
-        var stderr = PumpReaderAsync(_process.StandardError);
+        var stdout = ProcessRunner.ReadPipe(_process.StandardOutput, _onOutput, _disposeCts.Token);
+        var stderr = ProcessRunner.ReadPipe(_process.StandardError, _onOutput, _disposeCts.Token);
         int exitCode;
         try
         {
@@ -375,28 +382,6 @@ public sealed class ManagedProcess : IDisposable
         if (Interlocked.Exchange(ref _exitReported, 1) == 0)
         {
             _onExit(exitCode);
-        }
-    }
-
-    private async Task PumpReaderAsync(StreamReader reader)
-    {
-        var chars = new char[4096];
-        while (!_disposeCts.IsCancellationRequested)
-        {
-            int read;
-            try
-            {
-                read = await reader.ReadAsync(chars.AsMemory(0, chars.Length), _disposeCts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            if (read <= 0)
-            {
-                return;
-            }
-            _onOutput(new string(chars, 0, read));
         }
     }
 

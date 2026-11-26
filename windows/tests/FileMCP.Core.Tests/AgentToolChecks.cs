@@ -18,18 +18,20 @@ internal static partial class Program
         var root = Path.Combine(testRoot, "agent-tools");
         Directory.CreateDirectory(Path.Combine(root, "nested"));
         var safe = new LocalTools(root, "Test", "test@example.invalid", false);
-        var full = new LocalTools(root, "Test", "test@example.invalid", true);
+        var capacity = int.TryParse(Environment.GetEnvironmentVariable("FILEMCP_MAX_CONCURRENT_COMMANDS"), out var configured) ? Math.Clamp(configured, 4, 16) : 8;
+        var sharedBudget = new WorkspaceCommandBudget(capacity);
+        var full = new LocalTools(root, "Test", "test@example.invalid", true, sharedBudget: sharedBudget);
         async Task<JsonObject> Call(LocalTools tools, string name, JsonObject? args = null) => (await tools.CallAsync(name, args ?? new JsonObject())).StructuredContent;
-        async Task<JsonObject> Poll(string id, int cursor = 0)
+        async Task<JsonObject> Poll(string id, int cursor = 0, int deadlineSeconds = 12)
         {
             var watch = Stopwatch.StartNew();
-            while (watch.Elapsed < TimeSpan.FromSeconds(12))
+            while (watch.Elapsed < TimeSpan.FromSeconds(deadlineSeconds))
             {
                 var value = await Call(full, "read_command_output", Obj(("session_id", id), ("cursor", cursor)));
                 if (value["state"]!.GetValue<string>() is not ("running" or "stopping")) return value;
                 await Task.Delay(30);
             }
-            throw new Exception("Command did not finish");
+            throw new Exception($"Command {id} did not finish within {deadlineSeconds}s");
         }
         try
         {
@@ -101,6 +103,113 @@ internal static partial class Program
             var completed = await Poll(id, partial["next_cursor"]!.GetValue<int>());
             Assert(completed["exit_code"]!.GetValue<int>() == 7 && completed["output"]!.GetValue<string>().Contains("second") && !completed["output"]!.GetValue<string>().Contains("first"), "cursor and nonzero exit");
             await AssertThrowsAsync(() => Call(full, "read_command_output", Obj(("session_id", id), ("cursor", 999999))), "cursor", "future cursor refused");
+            // Verify the same capacity and isolation promises as macOS.
+            var sessions = new List<string>();
+            for (var n = 0; n < capacity; n++)
+            {
+                Directory.CreateDirectory(Path.Combine(root, "parallel", $"w{n}"));
+                var slot = await Call(full, "start_command", Obj(
+                    ("request_id", $"parallel-{n}"), ("command", "Start-Sleep -Seconds 30"),
+                    ("cwd", $"parallel/w{n}")));
+                Assert(slot["state"]!.GetValue<string>() == "running", "parallel slot admitted");
+                sessions.Add(slot["session_id"]!.GetValue<string>());
+            }
+            Assert(sharedBudget.Status()["active_total"]!.GetValue<int>() == capacity, "all parallel slots occupied");
+            Directory.CreateDirectory(Path.Combine(root, "parallel", $"w{capacity}"));
+            await AssertThrowsAsync(() => Call(full, "start_command", Obj(
+                ("request_id", "parallel-capacity"), ("command", "Start-Sleep -Seconds 30"),
+                ("cwd", $"parallel/w{capacity}"))), "limit", "capacity enforced");
+            await Call(full, "write_file", Obj(("relative_path", "parallel/free.txt"), ("content", "safe")));
+            await AssertThrowsAsync(() => Call(full, "write_file", Obj(("relative_path", "parallel/w0/blocked.txt"), ("content", "blocked"))), "occupies", "overlapping mutation refused");
+            await Call(full, "workspace_context", Obj(("path", "parallel")));
+            await Call(full, "cancel_command", Obj(("session_id", sessions[0])));
+            Assert((await Poll(sessions[0]))["state"]!.GetValue<string>() == "cancelled", "one slot cancelled");
+            await AssertThrowsAsync(() => Call(full, "start_command", Obj(
+                ("request_id", "parallel-overlap"), ("command", "Start-Sleep -Seconds 30"),
+                ("cwd", "parallel/w1"))), "occupies", "cwd conflict refused");
+            var replacement = await Call(full, "start_command", Obj(
+                ("request_id", "parallel-replacement"), ("command", "Start-Sleep -Seconds 30"),
+                ("cwd", $"parallel/w{capacity}")));
+            Assert(replacement["state"]!.GetValue<string>() == "running", "released slot reusable");
+            for (var n = 1; n < sessions.Count; n++)
+                await Call(full, "cancel_command", Obj(("session_id", sessions[n])));
+            await Call(full, "cancel_command", Obj(("session_id", replacement["session_id"]!.GetValue<string>())));
+            for (var n = 1; n < sessions.Count; n++)
+                Assert((await Poll(sessions[n]))["state"]!.GetValue<string>() == "cancelled", "parallel session cancelled");
+            Assert((await Poll(replacement["session_id"]!.GetValue<string>()))["state"]!.GetValue<string>() == "cancelled", "replacement cancelled");
+            Assert(sharedBudget.Status()["active_total"]!.GetValue<int>() == 0, "parallel capacity released");
+            Directory.CreateDirectory(Path.Combine(root, "sync-a"));
+            Directory.CreateDirectory(Path.Combine(root, "sync-b"));
+            var syncA = Call(full, "run_command", Obj(("command", "Start-Sleep -Seconds 4; Write-Output SYNC_A"), ("cwd", "sync-a")));
+            var syncB = Call(full, "run_command", Obj(("command", "Start-Sleep -Seconds 4; Write-Output SYNC_B"), ("cwd", "sync-b")));
+            var syncWatch = Stopwatch.StartNew();
+            while (sharedBudget.Status()["active_synchronous"]!.GetValue<int>() < 2 && syncWatch.Elapsed < TimeSpan.FromSeconds(3))
+                await Task.Delay(25);
+            Assert(sharedBudget.Status()["active_synchronous"]!.GetValue<int>() == 2, "two synchronous commands overlapped");
+            await AssertThrowsAsync(() => Call(full, "run_command", Obj(("command", "Write-Output nope"), ("cwd", "sync-a"))),
+                "occupies", "synchronous cwd overlap refused");
+            await Call(full, "write_file", Obj(("relative_path", "nested/independent.txt"), ("content", "safe")));
+            await AssertThrowsAsync(() => Call(full, "write_file", Obj(("relative_path", "sync-a/blocked.txt"), ("content", "blocked"))), "occupies", "overlapping mutation blocked during synchronous commands");
+            var results = await Task.WhenAll(syncA, syncB);
+            Assert(results[0]["result"]!.GetValue<string>().Contains("SYNC_A") &&
+                   results[1]["result"]!.GetValue<string>().Contains("SYNC_B"), "parallel results available");
+            Assert(sharedBudget.Status()["active_total"]!.GetValue<int>() == 0, "synchronous capacity released");
+            Console.WriteLine($"windows-agent-capacity-{capacity}: testing completed output retention");
+            var retained = new List<string>();
+            var gate = "while (-not (Test-Path release)) { Start-Sleep -Milliseconds 50 }";
+            for (var n = 0; n <= capacity; n++)
+                Directory.CreateDirectory(Path.Combine(root, $"retained-{n}"));
+            try
+            {
+                for (var n = 0; n < capacity - 1; n++)
+                {
+                    var held = await Call(full, "start_command", Obj(("request_id", $"retained-{n}"), ("cwd", $"retained-{n}"), ("command", gate)));
+                    retained.Add(held["session_id"]!.GetValue<string>());
+                }
+                var shortDir = $"retained-{capacity - 1}";
+                var shortJob = await Call(full, "start_command", Obj(("request_id", shortDir), ("cwd", shortDir), ("command", gate + "; $bytes = [Text.Encoding]::ASCII.GetBytes(('x' * 120000)); $out = [Console]::OpenStandardOutput(); $out.Write($bytes, 0, $bytes.Length); $out.Flush()")));
+                var shortId = shortJob["session_id"]!.GetValue<string>();
+                File.WriteAllText(Path.Combine(root, shortDir, "release"), "");
+                var retainedPage = await Poll(shortId, deadlineSeconds: 30);
+                Assert(retainedPage["exit_code"]!.GetValue<int>() == 0, "retention fixture exits successfully");
+                Assert(!retainedPage["truncated"]!.GetValue<bool>(), "retention fixture output is not truncated");
+                Assert(retainedPage["has_more"]!.GetValue<bool>(), "retained output has more pages");
+                var next = await Call(full, "start_command", Obj(("request_id", "retained-replacement"), ("cwd", $"retained-{capacity}"), ("command", gate)));
+                retained.Add(next["session_id"]!.GetValue<string>());
+                var length = retainedPage["output"]!.GetValue<string>().Length;
+                while (retainedPage["has_more"]!.GetValue<bool>())
+                {
+                    retainedPage = await Call(full, "read_command_output", Obj(("session_id", shortId), ("cursor", retainedPage["next_cursor"]!.GetValue<int>())));
+                    length += retainedPage["output"]!.GetValue<string>().Length;
+                }
+                Assert(length == 120000, $"completed output survives replacement admission (received {length} of 120000 bytes)");
+            }
+            finally
+            {
+                for (var n = 0; n <= capacity; n++) File.WriteAllText(Path.Combine(root, $"retained-{n}", "release"), "");
+                foreach (var held in retained) await Poll(held, deadlineSeconds: 30);
+            }
+            Console.WriteLine($"windows-agent-capacity-{capacity}: testing synchronous saturation");
+            var synchronous = new List<Task<JsonObject>>();
+            for (var n = 0; n < capacity; n++)
+            {
+                var dir = $"sync-full-{n}";
+                Directory.CreateDirectory(Path.Combine(root, dir));
+                synchronous.Add(Call(full, "run_command", Obj(("cwd", dir), ("command", gate), ("timeout_seconds", 30))));
+            }
+            try
+            {
+                var deadline = Stopwatch.StartNew();
+                while (sharedBudget.Status()["active_synchronous"]!.GetValue<int>() < capacity && deadline.Elapsed < TimeSpan.FromSeconds(12))
+                    await Task.Delay(50);
+                Assert(sharedBudget.Status()["active_synchronous"]!.GetValue<int>() == capacity, "all synchronous slots occupied");
+                await Call(full, "list_files").WaitAsync(TimeSpan.FromSeconds(3));
+            }
+            finally
+            {
+                for (var n = 0; n < capacity; n++) File.WriteAllText(Path.Combine(root, $"sync-full-{n}", "release"), "");
+                await Task.WhenAll(synchronous);
+            }
             var cancel = await Call(full, "start_command", Obj(("request_id", "cancel"), ("command", "$child = Start-Process ping.exe -ArgumentList '-t 127.0.0.1' -PassThru -WindowStyle Hidden; $child.Id | Set-Content child.pid; Start-Sleep -Seconds 30")));
             var cancelId = cancel["session_id"]!.GetValue<string>();
             watch.Restart();
@@ -122,7 +231,7 @@ internal static partial class Program
                 page = await Call(full, "read_command_output", Obj(("session_id", floodId), ("cursor", page["next_cursor"]!.GetValue<int>())));
             }
             Assert(total is > 0 and <= 262_144, "retained output bounded");
-            for (var n = 0; n < 8; n++)
+            for (var n = 0; n < Math.Max(8, capacity); n++)
             {
                 var result = await Call(full, "start_command", Obj(("request_id", "retention-" + n), ("command", "exit 0")));
                 await Poll(result["session_id"]!.GetValue<string>());
