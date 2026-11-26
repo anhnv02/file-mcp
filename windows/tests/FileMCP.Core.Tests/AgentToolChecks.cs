@@ -22,16 +22,16 @@ internal static partial class Program
         var sharedBudget = new WorkspaceCommandBudget(capacity);
         var full = new LocalTools(root, "Test", "test@example.invalid", true, sharedBudget: sharedBudget);
         async Task<JsonObject> Call(LocalTools tools, string name, JsonObject? args = null) => (await tools.CallAsync(name, args ?? new JsonObject())).StructuredContent;
-        async Task<JsonObject> Poll(string id, int cursor = 0)
+        async Task<JsonObject> Poll(string id, int cursor = 0, int deadlineSeconds = 12)
         {
             var watch = Stopwatch.StartNew();
-            while (watch.Elapsed < TimeSpan.FromSeconds(12))
+            while (watch.Elapsed < TimeSpan.FromSeconds(deadlineSeconds))
             {
                 var value = await Call(full, "read_command_output", Obj(("session_id", id), ("cursor", cursor)));
                 if (value["state"]!.GetValue<string>() is not ("running" or "stopping")) return value;
                 await Task.Delay(30);
             }
-            throw new Exception("Command did not finish");
+            throw new Exception($"Command {id} did not finish within {deadlineSeconds}s");
         }
         try
         {
@@ -154,6 +154,7 @@ internal static partial class Program
             Assert(results[0]["result"]!.GetValue<string>().Contains("SYNC_A") &&
                    results[1]["result"]!.GetValue<string>().Contains("SYNC_B"), "parallel results available");
             Assert(sharedBudget.Status()["active_total"]!.GetValue<int>() == 0, "synchronous capacity released");
+            Console.WriteLine($"windows-agent-capacity-{capacity}: testing completed output retention");
             var retained = new List<string>();
             var gate = "while (-not (Test-Path release)) { Start-Sleep -Milliseconds 50 }";
             for (var n = 0; n <= capacity; n++)
@@ -166,10 +167,12 @@ internal static partial class Program
                     retained.Add(held["session_id"]!.GetValue<string>());
                 }
                 var shortDir = $"retained-{capacity - 1}";
-                var shortJob = await Call(full, "start_command", Obj(("request_id", shortDir), ("cwd", shortDir), ("command", gate + "; [Console]::Write(('x' * 120000))")));
+                var shortJob = await Call(full, "start_command", Obj(("request_id", shortDir), ("cwd", shortDir), ("command", gate + "; $bytes = [Text.Encoding]::ASCII.GetBytes(('x' * 120000)); $out = [Console]::OpenStandardOutput(); $out.Write($bytes, 0, $bytes.Length); $out.Flush()")));
                 var shortId = shortJob["session_id"]!.GetValue<string>();
                 File.WriteAllText(Path.Combine(root, shortDir, "release"), "");
-                var retainedPage = await Poll(shortId);
+                var retainedPage = await Poll(shortId, deadlineSeconds: 30);
+                Assert(retainedPage["exit_code"]!.GetValue<int>() == 0, "retention fixture exits successfully");
+                Assert(!retainedPage["truncated"]!.GetValue<bool>(), "retention fixture output is not truncated");
                 Assert(retainedPage["has_more"]!.GetValue<bool>(), "retained output has more pages");
                 var next = await Call(full, "start_command", Obj(("request_id", "retained-replacement"), ("cwd", $"retained-{capacity}"), ("command", gate)));
                 retained.Add(next["session_id"]!.GetValue<string>());
@@ -179,13 +182,14 @@ internal static partial class Program
                     retainedPage = await Call(full, "read_command_output", Obj(("session_id", shortId), ("cursor", retainedPage["next_cursor"]!.GetValue<int>())));
                     length += retainedPage["output"]!.GetValue<string>().Length;
                 }
-                Assert(length == 120000, "completed output survives replacement admission");
+                Assert(length == 120000, $"completed output survives replacement admission (received {length} of 120000 bytes)");
             }
             finally
             {
                 for (var n = 0; n <= capacity; n++) File.WriteAllText(Path.Combine(root, $"retained-{n}", "release"), "");
-                foreach (var held in retained) await Poll(held);
+                foreach (var held in retained) await Poll(held, deadlineSeconds: 30);
             }
+            Console.WriteLine($"windows-agent-capacity-{capacity}: testing synchronous saturation");
             var synchronous = new List<Task<JsonObject>>();
             for (var n = 0; n < capacity; n++)
             {
