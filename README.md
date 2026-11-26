@@ -25,7 +25,7 @@ Connect remotely through **OpenAI Secure MCP Tunnel** or **Cloudflare Tunnel wit
 - **Filesystem MCP:** browse, read, write and search a selected local workspace.
 - **AI coding tools:** repository overview, scoped context, code search and conflict-checked patches.
 - **Git integration:** inspect changes, stage files, commit and optionally push.
-- **Terminal access:** optional shell commands and cancellable command sessions.
+- **Terminal access:** optional shell commands and parallel, cancellable command sessions.
 - **Codex integration:** import conversations into local Codex history.
 - **Native desktop apps:** Swift/AppKit on macOS and C#/.NET 8/WPF on Windows.
 - **Controlled access:** workspace path checks, configurable permissions, credential storage and outbound tunnels.

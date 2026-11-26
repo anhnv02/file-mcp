@@ -82,7 +82,10 @@ jobs:
         run: bash tests/test_swift_ui.sh
 
       - name: Coding tool regression tests
-        run: bash tests/test_swift_agent_tools.sh
+        run: |
+          for capacity in 4 8 16; do
+            FILEMCP_MAX_CONCURRENT_COMMANDS="$capacity" bash tests/test_swift_agent_tools.sh
+          done
 
       - name: Build app
         run: ./build_macos_app.sh
@@ -149,6 +152,16 @@ jobs:
       - name: Windows integration tests
         shell: pwsh
         run: ./tests/test_windows_runtime.ps1
+
+      - name: Windows command capacity regression
+        shell: pwsh
+        run: |
+          $env:FILEMCP_RG = Join-Path $PWD "vendor/ripgrep/windows-amd64/rg.exe"
+          foreach ($capacity in @(4, 16)) {
+            $env:FILEMCP_MAX_CONCURRENT_COMMANDS = "$capacity"
+            dotnet run --no-build --project windows/tests/FileMCP.Core.Tests/FileMCP.Core.Tests.csproj -c Release -- --agent-tools-only
+            if ($LASTEXITCODE -ne 0) { throw "Command capacity $capacity regression failed." }
+          }
 
       - name: Build Windows x64 release
         shell: pwsh

@@ -187,7 +187,7 @@ FileMCP discovers the Codex CLI from the normal platform installation paths and 
 run_command(command, cwd="", timeout_seconds=30)
 ```
 
-`run_command` is exposed only when shell-command permission is enabled in FileMCP settings. It is intentionally not placed inside an OS-level sandbox. For longer coding jobs, FileMCP also exposes `start_command`, `read_command_output`, and `cancel_command`: one runtime-owned job can stream bounded output through cursors, report a terminal state and exit code, and be cancelled with descendant cleanup.
+`run_command` is exposed only when shell-command permission is enabled in FileMCP settings. It is intentionally not placed inside an OS-level sandbox. For longer coding jobs, FileMCP also exposes `start_command`, `read_command_output`, and `cancel_command`: runtime-owned jobs stream bounded output through cursors, report terminal states and exit codes, and can be cancelled independently with descendant cleanup.
 
 - macOS executes through the user's configured shell, falling back to `/bin/sh`.
 - Windows executes through Windows PowerShell with `-NoProfile -NonInteractive`.
@@ -239,7 +239,7 @@ Git operations and mutating MCP tools are serialized against each other so anoth
 
 ### Process lifecycle
 
-- `run_command` defaults to **30 seconds** and is capped at **120 seconds**. The separate `start_command` session API defaults to **600 seconds**, with an allowed range of **1–3,600 seconds**; one job may run at a time.
+- `run_command` defaults to **30 seconds** and is capped at **120 seconds**. The separate `start_command` session API defaults to **600 seconds**, with an allowed range of **1–3,600 seconds**; synchronous and asynchronous commands share a limit of 8 by default (4–16 via `FILEMCP_MAX_CONCURRENT_COMMANDS`, read at startup). Working directories must not overlap. File and Git mutations are refused on overlapping paths; unrelated paths remain available. Read-only tools can observe in-flight work. Completed sessions have a separate retention budget of 8 or the configured capacity, whichever is higher; older completed sessions are pruned on later starts. Cwd checks are cooperative, not an OS sandbox or Git metadata isolation. Clients on the same runtime share a trust boundary; session IDs are not conversation-scoped. Heavy builds can require a lower concurrency limit.
 - Synchronous `run_command` and Git results cap stdout and stderr at **100 KB per stream**. Command sessions use a separate bounded combined-output buffer and expose truncation/cursor metadata.
 - Executable, argument, and environment strings are validated before process launch; NUL-truncation and invalid environment names are rejected.
 - macOS launches children in dedicated process groups and cleans descendants on timeout/stop/parent exit.

@@ -175,7 +175,20 @@ private struct RipgrepTarget {
 private final class LocalTools {
     private let resolver: SafePathResolver
     private let sessionLock = NSLock()
+    // Bounded concurrency across independent working directories. These are
+    // cooperative collision checks, not a shell sandbox (commands can use
+    // absolute paths and access files outside their working directory).
+    // Runtime setting for synchronous and long-running commands together.
+    // The default is 8; clamp explicit values to the supported 4...16 range.
+    // This is an admission bound, not a promise of available CPU or RAM.
+    private let maxActiveCommandSessions: Int = {
+        let raw = ProcessInfo.processInfo.environment["FILEMCP_MAX_CONCURRENT_COMMANDS"] ?? ""
+        guard let value = Int(raw) else { return 8 }
+        return min(16, max(4, value))
+    }()
     private var sessions: [CommandSession] = []
+    // Synchronous run_command calls hold scoped command leases too.
+    private var synchronousCommandPaths: [UUID: String] = [:]
     private var usedRequestIDs: Set<String> = []
     private var sessionsStopped = false
     private let gitUserName: String
@@ -183,13 +196,12 @@ private final class LocalTools {
     private let enableCommands: Bool
     private let enableGitPush: Bool
     private let enableCodexHistory: Bool
-    private let toolSlots = DispatchSemaphore(value: 8)
+    private let toolSlots = DispatchSemaphore(value: 16)
     private let mutationSlot = DispatchSemaphore(value: 1)
-    private let commandSlots = DispatchSemaphore(value: 2)
     private let gitSlots = DispatchSemaphore(value: 3)
     private let codexHistorySlot = DispatchSemaphore(value: 1)
     private let serializedToolNames: Set<String> = [
-        "write_file", "delete_file", "delete_directory", "run_command", "edit_file", "apply_patch", "workspace_context", "start_command",
+        "write_file", "delete_file", "delete_directory", "edit_file", "apply_patch", "workspace_context", "start_command",
         "git_init", "git_status", "git_log", "git_diff", "git_add", "git_commit", "git_push",
     ]
     private let batchReadToolNames: Set<String> = [
@@ -532,8 +544,9 @@ private final class LocalTools {
     }
 
     func call(name: String, arguments: [String: Any]) throws -> LocalToolCallOutput {
-        toolSlots.wait()
-        defer { toolSlots.signal() }
+        let usesToolSlot = name != "run_command"
+        if usesToolSlot { toolSlots.wait() }
+        defer { if usesToolSlot { toolSlots.signal() } }
         try validateArguments(arguments, for: name)
 
         let needsSerialization = serializedToolNames.contains(name) ||
@@ -544,7 +557,9 @@ private final class LocalTools {
             throw MCPServerError.operationFailed("Runtime has stopped")
         }
 
-        if needsSerialization && name != "start_command" { try ensureNoActiveCommand() }
+        if needsSerialization && name != "start_command" {
+            try ensureNoConflictingCommand(for: name, arguments: arguments)
+        }
 
         switch name {
         case "edit_file": return objectOutput(try editFile(arguments))
@@ -1991,8 +2006,8 @@ private final class LocalTools {
             throw MCPServerError.invalidPath("No such working directory: \(cwd.isEmpty ? "." : cwd)")
         }
 
-        commandSlots.wait()
-        defer { commandSlots.signal() }
+        let lease = try acquireSynchronousCommandLease(workdir.path)
+        defer { releaseSynchronousCommandLease(lease) }
 
         let shell = preferredShell()
         let result = try ProcessRunner.run(
@@ -3973,7 +3988,7 @@ private extension LocalTools {
         ]
         if enableCommands {
             definitions += [
-                tool(name: "start_command", description: "Start a long-running non-interactive shell command (shell permission required; not OS-sandboxed). Returns immediately. Reuse request_id with identical arguments after an uncertain response to avoid duplicate execution. One active session per runtime. Read output until terminal state AND has_more=false; use cancel_command to stop. Runtime disconnect stops jobs; output is bounded and retained for the latest eight jobs.",
+                tool(name: "start_command", description: "Start a long-running non-interactive shell command (shell permission required; not OS-sandboxed). Returns immediately. Reuse request_id with identical arguments after an uncertain response to avoid duplicate execution. The shared command limit is \(maxActiveCommandSessions) (configurable from 4 to 16; default 8). Use non-overlapping working directories. Read output until terminal state AND has_more=false; use cancel_command to stop. Runtime disconnect stops jobs; output is bounded; completed sessions are retained separately from active jobs.",
                      properties: ["request_id": stringProperty("Unique retry key, 1–128 ASCII letters/digits/dot/underscore/hyphen. Reuse only for the same command."),
                                   "command": stringProperty("Shell command."), "cwd": stringProperty("Working directory inside shared root."),
                                   "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": 3600, "default": 600]],
@@ -4223,15 +4238,26 @@ private extension LocalTools {
             guard existing.command == command, existing.cwd == cwd.path, existing.timeout == timeout else { throw MCPServerError.invalidArguments("request_id already used with different arguments") }
             return try existing.snapshot(cursor: 0)
         }
-        guard !sessions.contains(where: { $0.active }) else { throw MCPServerError.operationFailed("A command session is active; finish or cancel it before starting another") }
+        let activePaths = activeCommandPathsUnderLock()
+        guard activePaths.count < maxActiveCommandSessions else {
+            throw MCPServerError.operationFailed("Concurrent command limit reached (\(maxActiveCommandSessions)); finish or cancel a session first")
+        }
+        guard !activePaths.contains(where: { Self.overlappingPaths($0, cwd.path) }) else {
+            throw MCPServerError.operationFailed("Another active command occupies this working directory or a parent/child directory; use an independent worktree")
+        }
         // Evicted retry keys remain tombstoned for this runtime: never execute an old retry twice.
         guard !usedRequestIDs.contains(key) else { throw MCPServerError.operationFailed("request_id expired; use a new ID only for an intentional new execution") }
         guard usedRequestIDs.count < 4096 else { throw MCPServerError.operationFailed("Runtime command quota reached; reconnect to start a fresh runtime") }
         let session = CommandSession(requestID: key, command: command, cwd: cwd.path, timeout: timeout)
         try session.launch(shell: preferredShell())
+        // Reserve retention for the new session without ever evicting it.
+        let completedLimit = max(8, maxActiveCommandSessions)
+        while sessions.filter({ !$0.active }).count >= completedLimit,
+              let oldestFinished = sessions.firstIndex(where: { !$0.active }) {
+            sessions.remove(at: oldestFinished)
+        }
         usedRequestIDs.insert(key)
         sessions.append(session)
-        if sessions.count > 8 { sessions.removeFirst() }
         return try session.snapshot(cursor: 0)
     }
 
@@ -4242,9 +4268,73 @@ private extension LocalTools {
         return session
     }
 
-    func ensureNoActiveCommand() throws {
+    private func activeCommandPathsUnderLock() -> [String] {
+        sessions.filter { $0.active }.map(\.cwd) + Array(synchronousCommandPaths.values)
+    }
+
+    private func acquireSynchronousCommandLease(_ workdir: String) throws -> UUID {
+        // Mutations also acquire mutationSlot. Release it immediately after
+        // admission so independent tool calls can continue while we run.
+        mutationSlot.wait()
+        defer { mutationSlot.signal() }
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        guard !sessionsStopped else {
+            throw MCPServerError.operationFailed("Runtime has stopped")
+        }
+        let activePaths = activeCommandPathsUnderLock()
+        guard activePaths.count < maxActiveCommandSessions else {
+            throw MCPServerError.operationFailed("Concurrent command limit reached (\(maxActiveCommandSessions))")
+        }
+        guard !activePaths.contains(where: { Self.overlappingPaths($0, workdir) }) else {
+            throw MCPServerError.operationFailed("Another active command occupies this working directory or a parent/child directory; use an independent worktree")
+        }
+        let id = UUID()
+        synchronousCommandPaths[id] = workdir
+        return id
+    }
+
+    private func releaseSynchronousCommandLease(_ lease: UUID) {
+        sessionLock.lock()
+        synchronousCommandPaths.removeValue(forKey: lease)
+        sessionLock.unlock()
+    }
+
+    // This prevents commands operating in one worktree from blocking unrelated
+    // worktrees. It does not constrain what a shell process can write outside cwd.
+    private static func overlappingPaths(_ lhs: String, _ rhs: String) -> Bool {
+        lhs == rhs || lhs.hasPrefix(rhs.hasSuffix("/") ? rhs : rhs + "/") || rhs.hasPrefix(lhs.hasSuffix("/") ? lhs : lhs + "/")
+    }
+
+    func ensureNoConflictingCommand(for name: String, arguments: [String: Any]) throws {
+        var paths: [String] = []
+        switch name {
+        case "write_file", "edit_file":
+            paths = [try resolver.resolve(requiredString(arguments, "relative_path")).path]
+        case "delete_file", "delete_directory":
+            // Preserve safe deletion of a symlink whose target is outside the
+            // workspace. Resolve its parent, never follow the final symlink.
+            paths = [try resolver.resolveForDeletion(requiredString(arguments, "relative_path")).path]
+        case "apply_patch":
+            guard let changes = arguments["changes"] as? [[String: Any]] else {
+                throw MCPServerError.invalidArguments("changes must be an array")
+            }
+            paths = try changes.map { try resolver.resolve(requiredString($0, "relative_path")).path }
+        case "git_init", "git_add", "git_commit", "git_push":
+            paths = [try resolver.resolve(string(arguments, "repo_path", default: "")).path]
+        case "run_command":
+            paths = [try resolver.resolve(string(arguments, "cwd", default: "")).path]
+        default:
+            // Read-only status and context operations may observe in-flight work.
+            return
+        }
         sessionLock.lock(); defer { sessionLock.unlock() }
-        guard !sessions.contains(where: { $0.active }) else { throw MCPServerError.operationFailed("Command session is active; finish or cancel it before file mutations or Git operations") }
+        let activePaths = activeCommandPathsUnderLock()
+        guard !paths.contains(where: { target in
+            activePaths.contains(where: { Self.overlappingPaths(target, $0) })
+        }) else {
+            throw MCPServerError.operationFailed("Active command in this working directory: finish or cancel it before modifying files or Git state")
+        }
     }
 
     private var runtimeHasStopped: Bool {
